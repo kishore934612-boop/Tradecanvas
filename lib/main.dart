@@ -23,10 +23,30 @@ import 'package:app/services/leaderboard_service.dart';
 import 'package:app/providers/learn_provider.dart';
 import 'package:app/providers/leaderboard_provider.dart';
 import 'package:app/providers/portfolio_provider.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:app/services/persistence/sqlite_db_helper.dart';
+import 'package:app/data/repositories/sqlite_repositories.dart';
+import 'package:app/domain/repositories/portfolio_repository.dart';
+import 'package:app/domain/repositories/position_repository.dart';
+import 'package:app/domain/repositories/trade_repository.dart';
+import 'package:app/domain/repositories/learning_repository.dart';
+import 'package:app/domain/repositories/watchlist_repository.dart';
+import 'package:app/domain/repositories/statistics_repository.dart';
+import 'package:app/services/sync/sync_coordinator.dart';
+import 'package:app/constants/auth_config.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
+  try {
+    await Supabase.initialize(
+      url: AuthConfig.supabaseUrl,
+      publishableKey: AuthConfig.supabaseAnonKey,
+    );
+  } catch (e) {
+    Logger.instance.error('Supabase failed to initialize on startup (using placeholder): $e');
+  }
+
   // Phase 2: Initialize new repository layer
   await _initializeServices();
   // Register default services (loggers, notifications)
@@ -78,6 +98,19 @@ Future<void> _initializeServices() async {
   // Phase 8: Register persistence layer first (everything else may depend on it)
   serviceLocator.registerSingleton<PersistenceService>(SharedPreferencesPersistence());
 
+  // Initialize and register SQLite DB Helper & repositories
+  final dbHelper = SqliteDbHelper.instance;
+  await dbHelper.database;
+  serviceLocator.registerSingleton<SqliteDbHelper>(dbHelper);
+
+  serviceLocator.registerSingleton<PortfolioRepository>(SqlitePortfolioRepository());
+  serviceLocator.registerSingleton<PositionRepository>(SqlitePositionRepository());
+  serviceLocator.registerSingleton<TradeRepository>(SqliteTradeRepository());
+  serviceLocator.registerSingleton<LearningRepository>(SqliteLearningRepository());
+  serviceLocator.registerSingleton<WatchlistRepository>(SqliteWatchlistRepository());
+  serviceLocator.registerSingleton<StatisticsRepository>(SqliteStatisticsRepository());
+  serviceLocator.registerSingleton<SyncCoordinator>(SyncCoordinator.instance);
+
   // Register core services
   serviceLocator.registerSingleton<Logger>(logger);
   if (!kDebugMode) {
@@ -92,7 +125,7 @@ Future<void> _initializeServices() async {
   serviceLocator.registerSingleton<BinanceProvider>(BinanceProvider());
   
   // Register Learn & Leaderboard Services
-  final learnService = LearnService(persistence: serviceLocator<PersistenceService>());
+  final learnService = LearnService();
   serviceLocator.registerSingleton<LearnService>(learnService);
   serviceLocator.registerSingleton<LeaderboardService>(LeaderboardService());
   

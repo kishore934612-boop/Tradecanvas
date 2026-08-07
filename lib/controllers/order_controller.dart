@@ -41,8 +41,8 @@ class OrderController extends ChangeNotifier {
   final List<PendingOrder> _pendingOrders = [];
 
   OrderController({
-    required EventBus this._eventBus,
-    required Logger this._logger,
+    required this._eventBus,
+    required this._logger,
   }) {
     _logger.info('OrderController initialized');
   }

@@ -23,10 +23,10 @@ class MarketRepositoryImpl implements MarketRepository {
   bool _isInitialized = false;
 
   MarketRepositoryImpl({
-    required BinanceProvider this._binanceProvider,
-    required CacheManager this._cache,
-    required EventBus this._eventBus,
-    required Logger this._logger,
+    required this._binanceProvider,
+    required this._cache,
+    required this._eventBus,
+    required this._logger,
   });
 
   /// Initialize repository and connect to real-time data sources

@@ -34,7 +34,7 @@ class NotificationManager extends ChangeNotifier {
   StreamSubscription? _subDailyPnl;
   StreamSubscription? _subTradeCompleted;
 
-  NotificationManager({required EventBus this._eventBus}) {
+  NotificationManager({required this._eventBus}) {
     _subscribeToEvents();
   }
 

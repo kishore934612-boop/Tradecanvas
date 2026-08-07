@@ -34,7 +34,7 @@ class RiskTrigger {
 class RiskManagementEngine {
   final Logger _logger;
 
-  RiskManagementEngine({required Logger this._logger}) {
+  RiskManagementEngine({required this._logger}) {
     _logger.info('RiskManagementEngine initialized');
   }
 

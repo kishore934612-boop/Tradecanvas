@@ -9,7 +9,7 @@ class LeaderboardProvider extends ChangeNotifier {
   List<LeaderboardEntry> _entries = [];
   bool _isLoading = false;
 
-  LeaderboardProvider({required LeaderboardService service}) : _service = service;
+  LeaderboardProvider({required this._service});
 
   String get timeframe => _timeframe;
   List<LeaderboardEntry> get entries => _entries;

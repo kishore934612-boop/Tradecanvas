@@ -28,8 +28,14 @@ import 'package:app/core/di/service_locator.dart';
 import 'package:app/engine/trading_engine.dart';
 // Phase 7: Market Scheduler
 import 'package:app/engine/market_scheduler.dart';
-// Phase 8: Persistence layer
 import 'package:app/services/persistence/persistence_service.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:app/domain/repositories/portfolio_repository.dart';
+import 'package:app/domain/repositories/position_repository.dart';
+import 'package:app/domain/repositories/trade_repository.dart';
+import 'package:app/domain/repositories/watchlist_repository.dart';
+import 'package:app/domain/repositories/statistics_repository.dart';
+import 'package:app/services/sync/sync_coordinator.dart';
 
 class TradingProvider extends ChangeNotifier {
   static const String _storageKey = '@tradeverse_state_v2';
@@ -91,8 +97,6 @@ class TradingProvider extends ChangeNotifier {
   int _revengeTrades = 0;
   final Map<String, double> _dailyRealized = {}; // dayKey -> realized pnl
   final Map<String, int> _tradesPerDay = {}; // dayKey -> count
-  int _lastLossClosedAt = 0;
-  double _lastTradeNotional = 0.0;
 
   final Set<String> _unlockedAchievements = {};
   final Set<String> _completedChallenges = {};
@@ -1595,8 +1599,6 @@ class TradingProvider extends ChangeNotifier {
     _revengeTrades = 0;
     _dailyRealized.clear();
     _tradesPerDay.clear();
-    _lastLossClosedAt = 0;
-    _lastTradeNotional = 0;
     _unlockedAchievements.clear();
     _completedChallenges.clear();
     _recentUnlocks.clear();
@@ -1619,79 +1621,251 @@ class TradingProvider extends ChangeNotifier {
 
   Future<void> _loadState() async {
     try {
-      final raw = await _persistence.readString(_storageKey);
-      if (raw == null) return;
-      final Map<String, dynamic> s = jsonDecode(raw);
-      startingCapital = (s['startingCapital'] as num?)?.toDouble() ?? startingBalance;
-      _balance = (s['balance'] as num?)?.toDouble() ?? startingCapital;
+      final userId = Supabase.instance.client.auth.currentUser?.id ?? 'guest';
+      final portfolioRepo = serviceLocator<PortfolioRepository>();
+      final positionRepo = serviceLocator<PositionRepository>();
+      final tradeRepo = serviceLocator<TradeRepository>();
+      final watchlistRepo = serviceLocator<WatchlistRepository>();
+
+      startingCapital = await portfolioRepo.getInitialBalance(userId);
+      _balance = await portfolioRepo.getAvailableBalance(userId);
+
+      final dbPositions = await positionRepo.getPositions(userId);
       _positions
         ..clear()
-        ..addAll((s['positions'] as List? ?? []).map((p) => Position.fromJson(p)));
-      _orders
-        ..clear()
-        ..addAll((s['orders'] as List? ?? []).map((o) => PendingOrder.fromJson(o)));
+        ..addAll(dbPositions);
+
+      final dbTrades = await tradeRepo.getTrades(userId);
       _trades
         ..clear()
-        ..addAll((s['trades'] as List? ?? []).map((t) => Trade.fromJson(t)));
+        ..addAll(dbTrades);
+
+      final dbWatchlist = await watchlistRepo.getWatchlist(userId);
       _favorites
         ..clear()
-        ..addAll(List<String>.from(s['favorites'] ?? []));
-      _news
-        ..clear()
-        ..addAll((s['news'] as List? ?? []).map((n) => NewsArticle.fromJson(n)));
-      _realizedPnl         = (s['realizedPnl'] as num?)?.toDouble() ?? 0.0;
-      _wins                = s['wins'] ?? 0;
-      _losses              = s['losses'] ?? 0;
-      _currentWinStreak    = s['currentWinStreak'] ?? 0;
-      _maxWinStreak        = s['maxWinStreak'] ?? 0;
-      _riskDisciplineTrades= s['riskDisciplineTrades'] ?? 0;
-      _riskRewardTrades    = s['riskRewardTrades'] ?? 0;
-      _ruleViolations      = s['ruleViolations'] ?? 0;
-      _revengeTrades       = s['revengeTrades'] ?? 0;
-      _lastLossClosedAt    = s['lastLossClosedAt'] ?? 0;
-      _lastTradeNotional   = (s['lastTradeNotional'] as num?)?.toDouble() ?? 0.0;
-      (s['dailyRealized'] as Map?)?.forEach((k, v) => _dailyRealized[k] = (v as num).toDouble());
-      (s['tradesPerDay']  as Map?)?.forEach((k, v) => _tradesPerDay[k] = v as int);
-      _unlockedAchievements..clear()..addAll(List<String>.from(s['unlockedAchievements'] ?? []));
-      _completedChallenges..clear()..addAll(List<String>.from(s['completedChallenges'] ?? []));
-      // Phase 4: sync controllers from loaded state
-      _gamificationController.fromJson(s);
-      _positionController.fromJson(s);
-      _orderController.fromJson(s);
-      _portfolioController.fromJson(s);
+        ..addAll(dbWatchlist);
+
+      // Initialize controller balances
+      _portfolioController.fromJson({
+        'startingCapital': startingCapital,
+        'balance': _balance,
+      });
+
+      _recalculateStats();
       notifyListeners();
-    } catch (_) {}
+    } catch (e) {
+      Logger.instance.error('Failed to load local SQLite state: $e');
+    }
   }
 
   Future<void> _saveState() async {
     try {
-      await _persistence.writeString(
-        _storageKey,
-        jsonEncode({
-          'startingCapital':      startingCapital,
-          'balance':              _balance,
-          'positions':            _positions.map((p) => p.toJson()).toList(),
-          'orders':               _orders.map((o) => o.toJson()).toList(),
-          'trades':               _trades.map((t) => t.toJson()).toList(),
-          'favorites':            _favorites,
-          'news':                 _news.map((n) => n.toJson()).toList(),
-          'realizedPnl':          _realizedPnl,
-          'wins':                 _wins,
-          'losses':               _losses,
-          'currentWinStreak':     _currentWinStreak,
-          'maxWinStreak':         _maxWinStreak,
-          'riskDisciplineTrades': _riskDisciplineTrades,
-          'riskRewardTrades':     _riskRewardTrades,
-          'ruleViolations':       _ruleViolations,
-          'revengeTrades':        _revengeTrades,
-          'lastLossClosedAt':     _lastLossClosedAt,
-          'lastTradeNotional':    _lastTradeNotional,
-          'dailyRealized':        _dailyRealized,
-          'tradesPerDay':         _tradesPerDay,
-          'unlockedAchievements': _unlockedAchievements.toList(),
-          'completedChallenges':  _completedChallenges.toList(),
-        }),
-      );
+      final userId = Supabase.instance.client.auth.currentUser?.id ?? 'guest';
+      final portfolioRepo = serviceLocator<PortfolioRepository>();
+      final positionRepo = serviceLocator<PositionRepository>();
+      final tradeRepo = serviceLocator<TradeRepository>();
+      final watchlistRepo = serviceLocator<WatchlistRepository>();
+      final syncCoord = serviceLocator<SyncCoordinator>();
+
+      // 1. Save portfolio balance details
+      await portfolioRepo.saveBalances(userId, startingCapital, _balance);
+      await syncCoord.enqueue('portfolio', 'INSERT', userId, {
+        'user_id': userId,
+        'initial_balance': startingCapital,
+        'available_balance': _balance,
+        'updated_at': DateTime.now().toIso8601String(),
+      });
+
+      // 2. Positions (clear and overwrite active subset)
+      await positionRepo.clearPositions(userId);
+      for (final p in _positions) {
+        await positionRepo.addPosition(userId, p);
+        await syncCoord.enqueue('positions', 'INSERT', p.id, {
+          'position_id': p.id,
+          'user_id': userId,
+          'symbol': p.symbol,
+          'market_type': p.tradingType.id,
+          'entry_price': p.entryPrice,
+          'quantity': p.qty,
+          'leverage': p.leverage,
+          'margin': p.margin,
+          'direction': p.side.id,
+          'stop_loss': p.stopLoss,
+          'take_profit': p.takeProfit,
+          'opened_at': DateTime.fromMillisecondsSinceEpoch(p.openedAt).toIso8601String(),
+        });
+      }
+
+      // 3. Trades (incrementally insert new rows only)
+      final dbTrades = await tradeRepo.getTrades(userId);
+      final Set<String> existingIds = dbTrades.map((t) => t.id).toSet();
+
+      for (final t in _trades) {
+        if (!existingIds.contains(t.id)) {
+          await tradeRepo.addTrade(userId, t);
+          await syncCoord.enqueue('trades', 'INSERT', t.id, {
+            'trade_id': t.id,
+            'user_id': userId,
+            'symbol': t.symbol,
+            'market_type': t.tradingType.id,
+            'direction': t.side.id,
+            'entry_price': t.entryPrice,
+            'exit_price': t.exitPrice,
+            'quantity': t.qty,
+            'leverage': t.leverage,
+            'entry_fee': t.fees / 2,
+            'exit_fee': t.fees / 2,
+            'realized_pnl': t.pnl,
+            'return_pct': t.pnlPct,
+            'duration': (t.durationMs / 1000).round(),
+            'closed_reason': t.closeReason,
+            'order_type': 'market',
+            'trade_status': t.closeReason == 'liquidation' ? 'liquidated' : 'closed',
+            'opened_at': DateTime.fromMillisecondsSinceEpoch(t.openedAt).toIso8601String(),
+            'closed_at': DateTime.fromMillisecondsSinceEpoch(t.closedAt).toIso8601String(),
+          });
+        } else {
+          // Sync changes to post-trade reflections or journal notes
+          final dbTrade = dbTrades.firstWhere((dt) => dt.id == t.id);
+          if (t.exitJournal != null && dbTrade.exitJournal == null) {
+            await tradeRepo.updateTradeJournal(userId, t.id, t.exitJournal!);
+            await syncCoord.enqueue('journal_entries', 'INSERT', '${t.id}_journal', {
+              'journal_id': '${t.id}_journal',
+              'user_id': userId,
+              'trade_id': t.id,
+              'title': '${t.symbol} Trade Journal',
+              'notes': t.notes,
+              'emotion': t.exitJournal?.emotionalState ?? '',
+              'mistakes': t.exitJournal?.whatWentWrong ?? '',
+              'lessons': t.exitJournal?.lessonsLearned ?? '',
+              'rating': 5,
+              'tags': '[]',
+              'screenshots': '[]',
+              'strategy': t.entryJournal?.strategy ?? '',
+              'created_at': DateTime.fromMillisecondsSinceEpoch(t.closedAt).toIso8601String(),
+            });
+          }
+          if (t.notes != dbTrade.notes) {
+            await tradeRepo.updateTradeNotes(userId, t.id, t.notes);
+            await syncCoord.enqueue('journal_entries', 'UPDATE', '${t.id}_journal', {
+              'journal_id': '${t.id}_journal',
+              'user_id': userId,
+              'trade_id': t.id,
+              'title': '${t.symbol} Trade Journal',
+              'notes': t.notes,
+              'created_at': DateTime.fromMillisecondsSinceEpoch(t.closedAt).toIso8601String(),
+            });
+          }
+        }
+      }
+
+      // 4. Watchlist
+      final dbWatchlist = await watchlistRepo.getWatchlist(userId);
+      final Set<String> existingSymbols = dbWatchlist.toSet();
+
+      for (final s in _favorites) {
+        if (!existingSymbols.contains(s)) {
+          await watchlistRepo.addToWatchlist(userId, s);
+          await syncCoord.enqueue('watchlist', 'INSERT', s, {
+            'user_id': userId,
+            'symbol': s,
+            'display_order': 0,
+            'created_at': DateTime.now().toIso8601String(),
+          });
+        }
+      }
+
+      for (final s in dbWatchlist) {
+        if (!_favorites.contains(s)) {
+          await watchlistRepo.removeFromWatchlist(userId, s);
+          await syncCoord.enqueue('watchlist', 'DELETE', s, null);
+        }
+      }
+
+      _recalculateStats();
+    } catch (e) {
+      Logger.instance.error('Failed to save SQLite state: $e');
+    }
+  }
+
+  void _recalculateStats() {
+    _wins = 0;
+    _losses = 0;
+    _currentWinStreak = 0;
+    _maxWinStreak = 0;
+    _realizedPnl = 0.0;
+    _dailyRealized.clear();
+    _tradesPerDay.clear();
+
+    final cronTrades = _trades.reversed.toList();
+    for (final t in cronTrades) {
+      _realizedPnl += t.pnl;
+      final dayKey = formatDate(t.closedAt).split(' ').first;
+      _dailyRealized[dayKey] = (_dailyRealized[dayKey] ?? 0.0) + t.pnl;
+      _tradesPerDay[dayKey] = (_tradesPerDay[dayKey] ?? 0) + 1;
+
+      if (t.isWin) {
+        _wins++;
+        _currentWinStreak++;
+        if (_currentWinStreak > _maxWinStreak) {
+          _maxWinStreak = _currentWinStreak;
+        }
+      } else {
+        _losses++;
+        _currentWinStreak = 0;
+      }
+    }
+    _saveStatisticsToDb();
+  }
+
+  Future<void> _saveStatisticsToDb() async {
+    try {
+      final userId = Supabase.instance.client.auth.currentUser?.id ?? 'guest';
+      final statsRepo = serviceLocator<StatisticsRepository>();
+      final syncCoord = serviceLocator<SyncCoordinator>();
+
+      final total = _trades.length;
+      final winRate = total > 0 ? (_wins / total) * 100.0 : 0.0;
+      final returnPct = startingCapital > 0 ? (_realizedPnl / startingCapital) * 100.0 : 0.0;
+
+      double largestWin = 0.0;
+      double largestLoss = 0.0;
+      for (final t in _trades) {
+        if (t.pnl > largestWin) largestWin = t.pnl;
+        if (t.pnl < largestLoss) largestLoss = t.pnl;
+      }
+
+      final statsMap = {
+        'total_trades': total,
+        'spot_trades': _trades.where((t) => t.tradingType == TradingType.spot).length,
+        'futures_trades': _trades.where((t) => t.tradingType == TradingType.futures).length,
+        'winning_trades': _wins,
+        'losing_trades': _losses,
+        'average_win': _wins > 0 ? _trades.where((t) => t.pnl > 0).map((t) => t.pnl).reduce((a, b) => a + b) / _wins : 0.0,
+        'average_loss': _losses > 0 ? _trades.where((t) => t.pnl < 0).map((t) => t.pnl).reduce((a, b) => a + b) / _losses : 0.0,
+        'largest_win': largestWin,
+        'largest_loss': largestLoss,
+        'average_holding_time': total > 0 ? _trades.map((t) => t.durationMs).reduce((a, b) => a + b) / total / 1000 : 0.0,
+        'best_day': '',
+        'worst_day': '',
+      };
+      
+      await statsRepo.saveUserStats(userId, statsMap);
+      await syncCoord.enqueue('user_statistics', 'INSERT', userId, {
+        'user_id': userId,
+        ...statsMap,
+      });
+
+      final String username = userId == 'guest' ? 'Guest Trader' : (Supabase.instance.client.auth.currentUser?.email ?? 'Google Trader');
+      await statsRepo.saveLeaderboardStats(userId, username, winRate, returnPct, _realizedPnl);
+      await syncCoord.enqueue('leaderboard_stats', 'INSERT', userId, {
+        'user_id': userId,
+        'username': username,
+        'win_rate': winRate,
+        'return_pct': returnPct,
+        'net_profit': _realizedPnl,
+        'updated_at': DateTime.now().toIso8601String(),
+      });
     } catch (_) {}
   }
 

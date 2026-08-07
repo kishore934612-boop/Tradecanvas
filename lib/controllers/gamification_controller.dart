@@ -47,8 +47,8 @@ class GamificationController extends ChangeNotifier {
   final List<String> _recentUnlocks = []; // consumed by UI for toast notifications
 
   GamificationController({
-    required EventBus this._eventBus,
-    required Logger this._logger,
+    required this._eventBus,
+    required this._logger,
   }) {
     _logger.info('GamificationController initialized');
     _subscribeToEvents();

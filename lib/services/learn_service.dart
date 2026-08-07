@@ -1,15 +1,14 @@
-import 'dart:convert';
+import 'package:app/core/di/service_locator.dart';
+import 'package:app/domain/repositories/learning_repository.dart';
+import 'package:app/services/sync/sync_coordinator.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:app/models/learn_models.dart';
-import 'package:app/services/persistence/persistence_service.dart';
 
 class LearnService {
-  final PersistenceService _persistence;
-  static const String _progressKey = '@learn_progress_v1';
-
   final List<Lesson> _lessons = [];
   final List<Quiz> _quizzes = [];
 
-  LearnService({required PersistenceService this._persistence}) {
+  LearnService() {
     _initStaticData();
   }
 
@@ -18,21 +17,21 @@ class LearnService {
 
   Future<void> loadProgress() async {
     try {
-      final raw = await _persistence.readString(_progressKey);
-      if (raw != null) {
-        final Map<String, dynamic> data = jsonDecode(raw);
-        final lessonData = data['lessons'] as Map<String, dynamic>? ?? {};
-        final quizData = data['quizzes'] as Map<String, dynamic>? ?? {};
+      final userId = Supabase.instance.client.auth.currentUser?.id ?? 'guest';
+      final repo = serviceLocator<LearningRepository>();
+      final data = await repo.getProgress(userId);
+      
+      final Map<String, dynamic> lessonData = data['lessons'] as Map<String, dynamic>? ?? {};
+      final Map<String, dynamic> quizData = data['quizzes'] as Map<String, dynamic>? ?? {};
 
-        for (final lesson in _lessons) {
-          if (lessonData.containsKey(lesson.id)) {
-            lesson.loadProgress(lessonData[lesson.id]);
-          }
+      for (final lesson in _lessons) {
+        if (lessonData.containsKey(lesson.id)) {
+          lesson.loadProgress(lessonData[lesson.id]);
         }
-        for (final quiz in _quizzes) {
-          if (quizData.containsKey(quiz.id)) {
-            quiz.loadProgress(quizData[quiz.id]);
-          }
+      }
+      for (final quiz in _quizzes) {
+        if (quizData.containsKey(quiz.id)) {
+          quiz.loadProgress(quizData[quiz.id]);
         }
       }
     } catch (_) {}
@@ -40,11 +39,60 @@ class LearnService {
 
   Future<void> saveProgress() async {
     try {
-      final Map<String, dynamic> data = {
-        'lessons': {for (var l in _lessons) l.id: l.toJson()},
-        'quizzes': {for (var q in _quizzes) q.id: q.toJson()},
-      };
-      await _persistence.writeString(_progressKey, jsonEncode(data));
+      final userId = Supabase.instance.client.auth.currentUser?.id ?? 'guest';
+      final repo = serviceLocator<LearningRepository>();
+
+      for (final lesson in _lessons) {
+        if (lesson.isCompleted) {
+          final payload = {
+            'user_id': userId,
+            'lesson_id': lesson.id,
+            'completed': 1,
+            'completion_time': lesson.estimatedTimeMinutes,
+            'last_opened': DateTime.fromMillisecondsSinceEpoch(lesson.lastReadTimestamp ?? DateTime.now().millisecondsSinceEpoch).toIso8601String(),
+            'updated_at': DateTime.now().toIso8601String(),
+          };
+          await repo.saveProgress(
+            userId,
+            lesson.id,
+            completed: true,
+            completionTime: lesson.estimatedTimeMinutes,
+            lastOpened: payload['last_opened'] as String,
+          );
+          
+          await serviceLocator<SyncCoordinator>().enqueue(
+            'learning_progress',
+            'INSERT',
+            lesson.id,
+            payload,
+          );
+        }
+      }
+
+      for (final quiz in _quizzes) {
+        if (quiz.isCompleted) {
+          final payload = {
+            'user_id': userId,
+            'lesson_id': quiz.id,
+            'completed': 1,
+            'quiz_score': quiz.highestScore,
+            'updated_at': DateTime.now().toIso8601String(),
+          };
+          await repo.saveProgress(
+            userId,
+            quiz.id,
+            completed: true,
+            quizScore: quiz.highestScore,
+          );
+          
+          await serviceLocator<SyncCoordinator>().enqueue(
+            'learning_progress',
+            'INSERT',
+            quiz.id,
+            payload,
+          );
+        }
+      }
     } catch (_) {}
   }
 

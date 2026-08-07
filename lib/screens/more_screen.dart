@@ -9,7 +9,6 @@ import 'package:app/providers/learn_provider.dart';
 import 'package:app/components/ui.dart';
 import 'package:app/screens/challenges_screen.dart';
 import 'package:app/screens/settings_screen.dart';
-import 'package:app/screens/subscription_screen.dart';
 import 'package:app/screens/analytics_screen.dart';
 import 'package:app/screens/leaderboard_screen.dart';
 
@@ -73,20 +72,7 @@ class ProfileScreen extends StatelessWidget {
 
 
 
-                  // 7. SUBSCRIPTION SECTION
-                  _buildSectionCard(
-                    context,
-                    colors,
-                    title: 'TRADEVERSE PRO',
-                    icon: Icons.workspace_premium_rounded,
-                    iconColor: Colors.orange,
-                    titleText: appState.isProUser ? 'Pro Membership Active' : 'Upgrade to TradeVerse Pro',
-                    subtitleText: 'Unlock AI Coach, Replay Mode, and Advanced Analytics',
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => const SubscriptionScreen()),
-                    ),
-                  ),
-                  const SizedBox(height: 16.0),
+
 
                   // 7.5 LEADERBOARD SECTION
                   _buildNavigationRow(
@@ -133,7 +119,6 @@ class ProfileScreen extends StatelessWidget {
 
   Widget _buildUserProfile(BuildContext context, AppState appState, ThemePalette colors) {
     final isLoggedIn = appState.isAuthenticated;
-    final isPro = appState.isProUser;
 
     return GlassCard(
       padding: const EdgeInsets.all(16.0),
@@ -141,18 +126,55 @@ class ProfileScreen extends StatelessWidget {
         children: [
           Row(
             children: [
-              Container(
-                width: 56.0,
-                height: 56.0,
-                decoration: BoxDecoration(
-                  gradient: colors.primaryGradient,
-                  shape: BoxShape.circle,
-                  boxShadow: colors.glowShadow,
-                ),
-                child: Icon(
-                  isLoggedIn ? Icons.verified_user_rounded : Icons.person_outline_rounded,
-                  color: colors.brightness == Brightness.dark ? Colors.black : Colors.white,
-                  size: 28.0,
+              InkWell(
+                onTap: isLoggedIn ? () => _showEditProfileBottomSheet(context, appState, colors) : null,
+                borderRadius: BorderRadius.circular(28.0),
+                child: Stack(
+                  children: [
+                    Container(
+                      width: 56.0,
+                      height: 56.0,
+                      decoration: BoxDecoration(
+                        gradient: colors.primaryGradient,
+                        shape: BoxShape.circle,
+                        boxShadow: colors.glowShadow,
+                        image: (isLoggedIn && appState.photoUrl != null && appState.photoUrl!.startsWith('http'))
+                            ? DecorationImage(image: NetworkImage(appState.photoUrl!), fit: BoxFit.cover)
+                            : null,
+                      ),
+                      child: (isLoggedIn && appState.photoUrl != null && !appState.photoUrl!.startsWith('http'))
+                          ? Center(
+                              child: Text(
+                                appState.photoUrl!,
+                                style: const TextStyle(fontSize: 26.0),
+                              ),
+                            )
+                          : (isLoggedIn && appState.photoUrl != null && appState.photoUrl!.startsWith('http'))
+                              ? null
+                              : Icon(
+                                  isLoggedIn ? Icons.person_rounded : Icons.person_outline_rounded,
+                                  color: colors.brightness == Brightness.dark ? Colors.black : Colors.white,
+                                  size: 28.0,
+                                ),
+                    ),
+                    if (isLoggedIn)
+                      Positioned(
+                        right: 0,
+                        bottom: 0,
+                        child: Container(
+                          padding: const EdgeInsets.all(3.0),
+                          decoration: BoxDecoration(
+                            color: colors.primary,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.edit_rounded,
+                            size: 10.0,
+                            color: Colors.black,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
               const SizedBox(width: 14.0),
@@ -162,24 +184,21 @@ class ProfileScreen extends StatelessWidget {
                   children: [
                     Row(
                       children: [
-                        Text(
-                          isLoggedIn ? appState.username! : 'Guest User',
-                          style: TextStyle(fontSize: 17.0, fontWeight: FontWeight.bold, color: colors.foreground),
+                        Flexible(
+                          child: Text(
+                            isLoggedIn ? appState.username! : 'Guest User',
+                            style: TextStyle(fontSize: 17.0, fontWeight: FontWeight.bold, color: colors.foreground),
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                        if (isPro) ...[
+                        if (isLoggedIn) ...[
                           const SizedBox(width: 6.0),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6.0, vertical: 2.0),
-                            decoration: BoxDecoration(
-                              gradient: colors.primaryGradient,
-                              borderRadius: BorderRadius.circular(6.0),
-                            ),
-                            child: const Text(
-                              'PRO',
-                              style: TextStyle(fontSize: 9.0, fontWeight: FontWeight.w900, color: Colors.black),
-                            ),
+                          GestureDetector(
+                            onTap: () => _showEditProfileBottomSheet(context, appState, colors),
+                            child: Icon(Icons.edit_rounded, size: 14.0, color: colors.mutedForeground),
                           ),
                         ],
+
                       ],
                     ),
                     const SizedBox(height: 2.0),
@@ -405,5 +424,160 @@ class ProfileScreen extends StatelessWidget {
     );
   }
 
+  void _showEditProfileBottomSheet(BuildContext context, AppState appState, ThemePalette colors) {
+    final nameController = TextEditingController(text: appState.username);
+    String selectedAvatar = appState.photoUrl ?? '🐂';
+    final List<String> avatars = ['🐂', '🐻', '🚀', '🦁', '🦅', '🐺', '👑', '💎', '📈', '📉'];
 
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return Padding(
+              padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: colors.card,
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(20.0)),
+                  border: Border.all(color: colors.border, width: 0.5),
+                ),
+                padding: const EdgeInsets.all(20.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          'Edit Profile',
+                          style: TextStyle(fontSize: 18.0, fontWeight: FontWeight.bold, color: colors.foreground),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.pop(context),
+                          icon: Icon(Icons.close_rounded, color: colors.mutedForeground),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16.0),
+                    Text(
+                      'Choose Avatar',
+                      style: TextStyle(fontSize: 14.0, fontWeight: FontWeight.bold, color: colors.foreground),
+                    ),
+                    const SizedBox(height: 12.0),
+                    SizedBox(
+                      height: 60.0,
+                      child: ListView.builder(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: avatars.length,
+                        itemBuilder: (context, index) {
+                          final avatar = avatars[index];
+                          final isSelected = selectedAvatar == avatar;
+                          return Padding(
+                            padding: const EdgeInsets.only(right: 12.0),
+                            child: InkWell(
+                              onTap: () {
+                                setState(() {
+                                  selectedAvatar = avatar;
+                                });
+                              },
+                              borderRadius: BorderRadius.circular(25.0),
+                              child: Container(
+                                width: 50.0,
+                                height: 50.0,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: isSelected ? colors.primary.withValues(alpha: 0.15) : colors.border.withValues(alpha: 0.1),
+                                  border: Border.all(
+                                    color: isSelected ? colors.primary : Colors.transparent,
+                                    width: 1.5,
+                                  ),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    avatar,
+                                    style: const TextStyle(fontSize: 26.0),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 20.0),
+                    Text(
+                      'Display Name',
+                      style: TextStyle(fontSize: 14.0, fontWeight: FontWeight.bold, color: colors.foreground),
+                    ),
+                    const SizedBox(height: 8.0),
+                    TextField(
+                      controller: nameController,
+                      maxLength: 18,
+                      decoration: InputDecoration(
+                        hintText: 'Enter name...',
+                        hintStyle: TextStyle(color: colors.mutedForeground),
+                        counterText: '',
+                        filled: true,
+                        fillColor: colors.border.withValues(alpha: 0.1),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10.0),
+                          borderSide: BorderSide(color: colors.border),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10.0),
+                          borderSide: BorderSide(color: colors.primary),
+                        ),
+                      ),
+                      style: TextStyle(color: colors.foreground),
+                    ),
+                    const SizedBox(height: 24.0),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.pop(context),
+                            style: OutlinedButton.styleFrom(
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12.0)),
+                              side: BorderSide(color: colors.border),
+                            ),
+                            child: Text('Cancel', style: TextStyle(color: colors.foreground)),
+                          ),
+                        ),
+                        const SizedBox(width: 12.0),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: () async {
+                              final text = nameController.text.trim();
+                              if (text.isNotEmpty) {
+                                await appState.updateDisplayDetails(displayName: text, photoUrl: selectedAvatar);
+                                if (context.mounted) {
+                                  Navigator.pop(context);
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Profile updated successfully!')),
+                                  );
+                                }
+                              }
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: colors.primary,
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12.0)),
+                            ),
+                            child: const Text('Save', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
 }

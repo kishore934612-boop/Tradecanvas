@@ -180,7 +180,6 @@ class Asset {
   // ── Rich metadata access ──────────────────────────
 
   /// Full AssetMetadata for this asset (null if not registered).
-  AssetMetadata? get _metadataOrNull => assetMetadataRegistry[symbol];
 
   /// Full AssetMetadata — falls back to derived values if unregistered.
   AssetMetadata get metadata => getAssetMetadataOrDefault(symbol);

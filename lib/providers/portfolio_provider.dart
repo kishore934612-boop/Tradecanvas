@@ -16,9 +16,9 @@ class PortfolioProvider extends ChangeNotifier {
   final Map<String, double> _currentPrices = {};
 
   PortfolioProvider({
-    required PortfolioController this._portfolioController,
-    required PositionController this._positionController,
-    required EventBus this._eventBus,
+    required this._portfolioController,
+    required this._positionController,
+    required this._eventBus,
   }) {
     _subscribeToEvents();
   }

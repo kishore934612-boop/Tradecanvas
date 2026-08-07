@@ -96,7 +96,7 @@ class ServiceLocator {
 /// Convenience getter
 ServiceLocator get sl => ServiceLocator.instance;
 
-/// Named alias — used as serviceLocator<T>() via call()
+/// Named alias — used as `serviceLocator<T>()` via call()
 ServiceLocator get serviceLocator => ServiceLocator.instance;
 
 extension ServiceLocatorCall on ServiceLocator {

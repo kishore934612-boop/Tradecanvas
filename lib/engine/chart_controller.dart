@@ -262,7 +262,7 @@ class ChartController extends ChangeNotifier {
   ChartController({
     required Asset asset,
     required String initialTimeframe,
-    Stream<double>? this._priceStream,
+    this._priceStream,
   })  : _asset = asset,
         _timeframe = initialTimeframe {
     Logger.instance.info('ChartController Created for ${asset.symbol} ($initialTimeframe)');

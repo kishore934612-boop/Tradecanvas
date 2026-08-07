@@ -8,7 +8,7 @@ class LearnProvider extends ChangeNotifier {
   LessonCategory _selectedCategory = LessonCategory.beginner;
   final List<String> _recentlyViewedIds = [];
 
-  LearnProvider({required LearnService learnService}) : _learnService = learnService {
+  LearnProvider({required this._learnService}) {
     _loadState();
   }
 

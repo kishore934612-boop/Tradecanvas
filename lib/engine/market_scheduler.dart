@@ -105,11 +105,11 @@ class MarketScheduler {
   bool _running = false;
 
   MarketScheduler({
-    required EventBus this._eventBus,
-    required Logger this._logger,
-    required void Function(Set<MarketType> activeMarkets) this._onPoll,
+    required this._eventBus,
+    required this._logger,
+    required this._onPoll,
     Set<MarketType>? watchedMarkets,
-    ScheduleConfig this._config = ScheduleConfig.defaults,
+    this._config = ScheduleConfig.defaults,
   }) : _watchedMarkets = watchedMarkets ?? MarketType.values.toSet() {
     _logger.info('MarketScheduler created for: ${_watchedMarkets.map((m) => m.label).join(", ")}');
   }

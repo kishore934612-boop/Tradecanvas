@@ -20,8 +20,8 @@ class PortfolioController extends ChangeNotifier {
   final Map<String, double> _dailyRealized = {}; // dayKey -> realized pnl
   
   PortfolioController({
-    required EventBus this._eventBus,
-    required Logger this._logger,
+    required this._eventBus,
+    required this._logger,
     required double initialBalance,
   })  : _balance = initialBalance,
         _startingCapital = initialBalance {
