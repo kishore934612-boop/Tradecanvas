@@ -1,14 +1,13 @@
 /// Service Locator for Dependency Injection
-/// 
-/// This provides a simple dependency injection mechanism using GetIt pattern.
+///
+/// A small hand-rolled locator backed by two `Map`s (one for singletons, one
+/// for factories). It is not GetIt and pulls in no DI package — registration
+/// and lookup are keyed on the generic type argument `T`.
 /// All services, repositories, and controllers should be registered here.
 library;
 
-import 'package:app/core/events/event_bus.dart';
 import 'package:app/core/logging/logger.dart';
 import 'package:app/core/logging/file_logger.dart';
-import 'package:app/core/notifications/notification_manager.dart';
-import 'package:app/services/notification_service.dart';
 
 class ServiceLocator {
   ServiceLocator._();
@@ -77,19 +76,9 @@ class ServiceLocator {
     _factories.remove(T);
   }
 
-  /// Register default services (loggers, notifications)
+  /// Register default services (loggers)
   void registerDefaults() {
     registerDefaultLoggers();
-    if (!isRegistered<NotificationManager>()) {
-      registerSingleton<NotificationManager>(
-        NotificationManager(eventBus: isRegistered<EventBus>() ? get<EventBus>() : EventBus.instance),
-      );
-    }
-    if (!isRegistered<NotificationService>()) {
-      registerSingleton<NotificationService>(
-        NotificationService(isRegistered<EventBus>() ? get<EventBus>() : EventBus.instance),
-      );
-    }
   }
 }
 

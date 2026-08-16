@@ -1,199 +1,191 @@
+/// Charty — a charting tool for Binance spot markets.
+library;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart'; // Added for kDebugMode
-import 'package:provider/provider.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:provider/provider.dart';
+
 import 'package:app/constants/colors.dart';
-import 'package:app/providers/trading_provider.dart';
-import 'package:app/providers/app_state.dart';
-import 'package:app/screens/splash_screen.dart';
-// Phase 2: Repository layer
 import 'package:app/core/di/service_locator.dart';
 import 'package:app/core/events/event_bus.dart';
 import 'package:app/core/logging/logger.dart';
 import 'package:app/data/cache/cache_manager.dart';
 import 'package:app/data/providers/market/binance_provider.dart';
 import 'package:app/data/repositories/market_repository_impl.dart';
+import 'package:app/data/repositories/sqlite_repositories.dart';
+import 'package:app/domain/repositories/chart_prefs_repository.dart';
+import 'package:app/domain/repositories/drawing_repository.dart';
+import 'package:app/domain/repositories/kline_cache_repository.dart';
 import 'package:app/domain/repositories/market_repository.dart';
-// Phase 8: Persistence layer
+import 'package:app/domain/repositories/watchlist_repository.dart';
+import 'package:app/providers/app_state.dart';
+import 'package:app/providers/market_data_provider.dart';
+import 'package:app/screens/splash_screen.dart';
 import 'package:app/services/persistence/persistence_service.dart';
 import 'package:app/services/persistence/shared_preferences_persistence.dart';
-import 'package:app/core/notifications/notification_manager.dart';
-import 'package:app/services/learn_service.dart';
-import 'package:app/services/leaderboard_service.dart';
-import 'package:app/providers/learn_provider.dart';
-import 'package:app/providers/leaderboard_provider.dart';
-import 'package:app/providers/portfolio_provider.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:app/services/persistence/sqlite_db_helper.dart';
-import 'package:app/data/repositories/sqlite_repositories.dart';
-import 'package:app/domain/repositories/portfolio_repository.dart';
-import 'package:app/domain/repositories/position_repository.dart';
-import 'package:app/domain/repositories/trade_repository.dart';
-import 'package:app/domain/repositories/learning_repository.dart';
-import 'package:app/domain/repositories/watchlist_repository.dart';
-import 'package:app/domain/repositories/statistics_repository.dart';
+import 'package:app/services/session.dart';
+import 'package:app/services/symbol_registry.dart';
 import 'package:app/services/sync/sync_coordinator.dart';
-import 'package:app/constants/auth_config.dart';
+import 'package:app/utils/haptics.dart';
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  try {
-    await Supabase.initialize(
-      url: AuthConfig.supabaseUrl,
-      publishableKey: AuthConfig.supabaseAnonKey,
-    );
-  } catch (e) {
-    Logger.instance.error('Supabase failed to initialize on startup (using placeholder): $e');
-  }
 
-  // Phase 2: Initialize new repository layer
-  await _initializeServices();
-  // Register default services (loggers, notifications)
-  serviceLocator.registerDefaults();
-  
-  runApp(
-    MultiProvider(
-      providers: [
-        ChangeNotifierProvider(create: (_) => AppState()),
-        ChangeNotifierProvider(
-          create: (_) => TradingProvider(
-            marketRepository: serviceLocator<MarketRepository>(),
-            logger: serviceLocator<Logger>(),
-          ),
-        ),
-        ChangeNotifierProvider(
-          create: (_) => LearnProvider(
-            learnService: serviceLocator<LearnService>(),
-          ),
-        ),
-        ChangeNotifierProvider(
-          create: (_) => LeaderboardProvider(
-            service: serviceLocator<LeaderboardService>(),
-          ),
-        ),
-        ChangeNotifierProxyProvider<TradingProvider, PortfolioProvider>(
-          create: (context) => PortfolioProvider(
-            portfolioController: context.read<TradingProvider>().portfolioController,
-            positionController: context.read<TradingProvider>().positionController,
-            eventBus: serviceLocator<EventBus>(),
-          ),
-          update: (context, trading, previous) => previous ?? PortfolioProvider(
-            portfolioController: trading.portfolioController,
-            positionController: trading.positionController,
-            eventBus: serviceLocator<EventBus>(),
-          ),
-        ),
-      ],
-      child: const MyApp(),
-    ),
-  );
+  await _registerServices();
+
+  runApp(const CharyApp());
 }
 
-/// Initialize Phase 2 services: repository layer and providers
-Future<void> _initializeServices() async {
+Future<void> _registerServices() async {
   final logger = Logger.instance;
-  logger.info('=== Phase 2: Initializing Repository Layer ===');
-  
-  // Phase 8: Register persistence layer first (everything else may depend on it)
-  serviceLocator.registerSingleton<PersistenceService>(SharedPreferencesPersistence());
+  if (!kDebugMode) logger.setEnabled(false);
 
-  // Initialize and register SQLite DB Helper & repositories
+  logger.info('Charty starting');
+
+  // ── Core ─────────────────────────────────────────────────
+  serviceLocator.registerSingleton<Logger>(logger);
+  serviceLocator.registerSingleton<EventBus>(EventBus.instance);
+  serviceLocator.registerDefaults();
+
+  // ── Persistence ──────────────────────────────────────────
+  serviceLocator
+      .registerSingleton<PersistenceService>(SharedPreferencesPersistence());
+
   final dbHelper = SqliteDbHelper.instance;
-  await dbHelper.database;
+  await dbHelper.init(); // runs onCreate/onUpgrade or sets up web fallback
   serviceLocator.registerSingleton<SqliteDbHelper>(dbHelper);
 
-  serviceLocator.registerSingleton<PortfolioRepository>(SqlitePortfolioRepository());
-  serviceLocator.registerSingleton<PositionRepository>(SqlitePositionRepository());
-  serviceLocator.registerSingleton<TradeRepository>(SqliteTradeRepository());
-  serviceLocator.registerSingleton<LearningRepository>(SqliteLearningRepository());
-  serviceLocator.registerSingleton<WatchlistRepository>(SqliteWatchlistRepository());
-  serviceLocator.registerSingleton<StatisticsRepository>(SqliteStatisticsRepository());
+  const session = LocalSession();
+  serviceLocator.registerSingleton<SessionProvider>(session);
   serviceLocator.registerSingleton<SyncCoordinator>(SyncCoordinator.instance);
 
-  // Register core services
-  serviceLocator.registerSingleton<Logger>(logger);
-  if (!kDebugMode) {
-    logger.setEnabled(false);
-  }
-  serviceLocator.registerSingleton<EventBus>(EventBus.instance);
-  serviceLocator.registerSingleton<NotificationManager>(
-      NotificationManager(eventBus: serviceLocator<EventBus>()));
+  // ── Repositories ─────────────────────────────────────────
+  serviceLocator.registerSingleton<KlineCacheRepository>(
+      PersistenceKlineCacheRepository(
+          persistence: serviceLocator<PersistenceService>(), logger: logger));
+  serviceLocator
+      .registerSingleton<WatchlistRepository>(SqliteWatchlistRepository());
+  serviceLocator.registerSingleton<DrawingRepository>(
+      SqliteDrawingRepository(session: session, logger: logger));
+  serviceLocator.registerSingleton<ChartPrefsRepository>(
+      SqliteChartPrefsRepository(session: session));
+
+  // ── Market data ──────────────────────────────────────────
+  final binance = BinanceProvider();
+  serviceLocator.registerSingleton<BinanceProvider>(binance);
   serviceLocator.registerSingleton<CacheManager>(CacheManager());
-  
-  // Register providers
-  serviceLocator.registerSingleton<BinanceProvider>(BinanceProvider());
-  
-  // Register Learn & Leaderboard Services
-  final learnService = LearnService();
-  serviceLocator.registerSingleton<LearnService>(learnService);
-  serviceLocator.registerSingleton<LeaderboardService>(LeaderboardService());
-  
-  // Register repository
-  final repository = MarketRepositoryImpl(
-    binanceProvider: serviceLocator<BinanceProvider>(),
+
+  final marketRepository = MarketRepositoryImpl(
+    binanceProvider: binance,
     cache: serviceLocator<CacheManager>(),
     eventBus: serviceLocator<EventBus>(),
     logger: logger,
   );
-  
-  serviceLocator.registerSingleton<MarketRepository>(repository);
-  
-  // Initialize repository (connect to data sources)
-  await repository.initialize();
-  
-  logger.info('=== Repository Layer Initialized Successfully ===');
+  serviceLocator.registerSingleton<MarketRepository>(marketRepository);
+
+  final registry = SymbolRegistry(
+    provider: binance,
+    persistence: serviceLocator<PersistenceService>(),
+    logger: logger,
+  );
+  serviceLocator.registerSingleton<SymbolRegistry>(registry);
+
+  // Drain anything queued from a previous offline session.
+  SyncCoordinator.instance.triggerProcessing();
+
+  logger.info('Services registered');
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class CharyApp extends StatelessWidget {
+  const CharyApp({super.key});
 
-  TextTheme _textTheme(ThemePalette palette, Brightness brightness) {
-    final base = brightness == Brightness.light ? ThemeData.light().textTheme : ThemeData.dark().textTheme;
-    return GoogleFonts.plusJakartaSansTextTheme(base).copyWith(
-      displayLarge: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: palette.text),
-      displayMedium: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: palette.text),
-      displaySmall: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: palette.text),
-      headlineLarge: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: palette.text),
-      headlineMedium: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: palette.text),
-      headlineSmall: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: palette.text),
-      titleLarge: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: palette.text),
-      titleMedium: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: palette.text),
-      titleSmall: GoogleFonts.outfit(fontWeight: FontWeight.bold, color: palette.text),
-    ).apply(bodyColor: palette.text, displayColor: palette.text);
+  @override
+  Widget build(BuildContext context) {
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => AppState()),
+        ChangeNotifierProvider<SymbolRegistry>.value(
+          value: serviceLocator<SymbolRegistry>(),
+        ),
+        ChangeNotifierProvider(
+          create: (_) => MarketDataProvider(
+            provider: serviceLocator<BinanceProvider>(),
+            registry: serviceLocator<SymbolRegistry>(),
+            watchlistRepo: serviceLocator<WatchlistRepository>(),
+            session: serviceLocator<SessionProvider>(),
+            logger: serviceLocator<Logger>(),
+          ),
+        ),
+      ],
+      child: const _AppRoot(),
+    );
+  }
+}
+
+class _AppRoot extends StatefulWidget {
+  const _AppRoot();
+
+  @override
+  State<_AppRoot> createState() => _AppRootState();
+}
+
+class _AppRootState extends State<_AppRoot> {
+  @override
+  void initState() {
+    super.initState();
+    // Symbols must load before the watchlist can resolve instruments.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _warmUp());
   }
 
-  ThemeData _buildTheme(ThemePalette p) {
-    return ThemeData(
-      brightness: p.brightness,
-      primaryColor: p.primary,
-      scaffoldBackgroundColor: p.background,
-      cardColor: p.card,
-      textTheme: _textTheme(p, p.brightness),
-      dividerColor: p.border,
-      colorScheme: ColorScheme.fromSeed(
-        seedColor: p.primary,
-        brightness: p.brightness,
-        primary: p.primary,
-        surface: p.card,
-        error: p.destructive,
-      ),
-      useMaterial3: true,
-      extensions: [AppThemeExtension(p)],
-    );
+  Future<void> _warmUp() async {
+    await context.read<SymbolRegistry>().load();
+    if (!mounted) return;
+    await context.read<MarketDataProvider>().initialize();
   }
 
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<AppState>();
 
+    // Keep the haptics switch in sync with the stored preference.
+    Haptics.enabled = appState.profile.hapticsEnabled;
+
     return MaterialApp(
-      title: 'TradeVerse',
+      title: 'TradeCanvas',
       debugShowCheckedModeBanner: false,
-      theme: _buildTheme(AppColors.getPalette(appState.themeIndex, Brightness.light)),
-      darkTheme: _buildTheme(AppColors.getPalette(appState.themeIndex, Brightness.dark)),
       themeMode: appState.themeMode,
+      theme: _buildTheme(Brightness.light),
+      darkTheme: _buildTheme(Brightness.dark),
       home: const SplashScreen(),
+    );
+  }
+
+  ThemeData _buildTheme(Brightness brightness) {
+    final palette = AppColors.forBrightness(brightness);
+
+    final base = ThemeData(
+      useMaterial3: true,
+      brightness: brightness,
+      scaffoldBackgroundColor: palette.background,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: palette.primary,
+        brightness: brightness,
+      ).copyWith(
+        surface: palette.card,
+        primary: palette.primary,
+        error: palette.destructive,
+      ),
+      dividerColor: palette.border,
+    );
+
+    return base.copyWith(
+      textTheme: GoogleFonts.spaceGroteskTextTheme(base.textTheme).apply(
+        bodyColor: palette.foreground,
+        displayColor: palette.foreground,
+      ),
+      extensions: [AppThemeExtension(palette)],
     );
   }
 }

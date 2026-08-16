@@ -1,6 +1,3 @@
-import 'package:app/constants/markets.dart';
-import 'package:app/models/asset_metadata.dart';
-
 /// Globally configurable currency symbol, set from the user's profile during
 /// onboarding (e.g. '\$').
 String appCurrency = '\$';
@@ -12,38 +9,14 @@ void setAppCurrency(String symbol) {
 String _withCommas(double value, int decimals) {
   final isNegative = value < 0;
   final absValue = value.abs();
-  String parts = absValue.toStringAsFixed(decimals);
-  List<String> split = parts.split('.');
-  String whole = split[0];
-  String fraction = split.length > 1 ? '.${split[1]}' : '';
+  final parts = absValue.toStringAsFixed(decimals);
+  final split = parts.split('.');
+  final whole = split[0];
+  final fraction = split.length > 1 ? '.${split[1]}' : '';
 
-  RegExp reg = RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))');
-  String result = whole.replaceAllMapped(reg, (Match m) => '${m[1]},');
+  final reg = RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))');
+  final result = whole.replaceAllMapped(reg, (Match m) => '${m[1]},');
   return '${isNegative ? '-' : ''}$result$fraction';
-}
-
-/// Format a price for display.
-/// Phase 9: Uses AssetMetadata decimal precision when a symbol is provided.
-String formatPrice(double price, MarketType? type, {String? symbol}) {
-  final currencySymbol = symbol != null ? (getAssetMetadata(symbol)?.currencySymbol ?? appCurrency) : appCurrency;
-  final sign = price < 0 ? '-' : '';
-  final absVal = price.abs();
-  
-  final str = absVal.toString();
-  final parts = str.split('.');
-  final wholeStr = parts[0];
-  String fractStr = parts.length > 1 ? parts[1] : '';
-  
-  if (fractStr == '0') {
-    fractStr = '00';
-  } else if (fractStr.length == 1) {
-    fractStr = '${fractStr}0';
-  }
-  
-  final wholeVal = double.tryParse(wholeStr) ?? 0.0;
-  final formattedWhole = _withCommas(wholeVal, 0);
-  
-  return '$sign$currencySymbol$formattedWhole.$fractStr';
 }
 
 String formatCurrency(double value) {

@@ -1,40 +1,45 @@
+/// App-wide state: onboarding, chart preferences, and theme.
+///
+/// Preferences live in key-value storage; watchlists, drawings and chart state
+/// live in local SQLite database.
+library;
+
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
-import 'package:app/models/user_profile.dart';
-import 'package:app/utils/formatters.dart';
-// Phase 8: Persistence layer
+
 import 'package:app/core/di/service_locator.dart';
+import 'package:app/core/logging/logger.dart';
+import 'package:app/engine/session_overlay.dart';
+import 'package:app/models/user_profile.dart';
 import 'package:app/services/persistence/persistence_service.dart';
 import 'package:app/services/persistence/shared_preferences_persistence.dart';
-import 'package:google_sign_in/google_sign_in.dart';
-import 'package:app/core/logging/logger.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:app/services/persistence/sqlite_db_helper.dart';
-import 'package:app/services/sync/sync_coordinator.dart';
 
-import 'package:app/constants/auth_config.dart';
-
-/// Holds onboarding state, the user profile, app-wide settings (theme, currency,
-/// haptics). Persisted independently of trading data so a reset of the account
-/// does not wipe the user's preferences.
 class AppState extends ChangeNotifier {
-  static const String _key = '@tradeverse_appstate';
+  static const String _key = '@charty_appstate';
 
   UserProfile _profile = UserProfile();
-  ThemeMode _themeMode = ThemeMode.system;
-  int _themeIndex = 0;
+
+  /// Only [ThemeMode.light] or [ThemeMode.dark] — there is no "system" option
+  /// or accent-color choice; each mode maps to exactly one fixed palette
+  /// (light = white/blue, dark = black/green).
+  ThemeMode _themeMode = ThemeMode.dark;
   bool _loaded = false;
 
   bool _isAuthenticated = false;
   String? _username;
   String? _email;
   String? _photoUrl;
-  bool _isProUser = false;
+  String? _lastAuthError;
 
-  final GoogleSignIn _googleSignIn = GoogleSignIn(
-    scopes: ['email', 'profile'],
-    serverClientId: AuthConfig.googleWebClientId,
-  );
+  /// Symbol the Chart tab reopens on.
+  String _lastSymbol = 'BTCUSDT';
+
+  /// Symbol previewed on the Dashboard tab. Unlike [_lastSymbol], selecting
+  /// this needs to visibly update the dashboard immediately, so its setter
+  /// notifies listeners.
+  String _dashboardSymbol = 'BTCUSDT';
 
   AppState() {
     _load();
@@ -42,7 +47,6 @@ class AppState extends ChangeNotifier {
 
   UserProfile get profile => _profile;
   ThemeMode get themeMode => _themeMode;
-  int get themeIndex => _themeIndex;
   bool get loaded => _loaded;
   bool get onboarded => _profile.onboarded;
 
@@ -50,29 +54,41 @@ class AppState extends ChangeNotifier {
   String? get username => _username;
   String? get email => _email;
   String? get photoUrl => _photoUrl;
-  bool get isProUser => _isProUser;
+  String? get lastAuthError => _lastAuthError;
+  String get lastSymbol => _lastSymbol;
+  String get dashboardSymbol => _dashboardSymbol;
 
   PersistenceService get _persistence =>
       serviceLocator.isRegistered<PersistenceService>()
           ? serviceLocator<PersistenceService>()
           : SharedPreferencesPersistence();
 
+  // ==========================================================
+  // PERSISTENCE
+  // ==========================================================
+
   Future<void> _load() async {
     try {
       final raw = await _persistence.readString(_key);
       if (raw != null) {
-        final Map<String, dynamic> state = jsonDecode(raw);
-        _profile = UserProfile.fromJson(state['profile'] ?? {});
-        _themeMode = ThemeMode.values[(state['themeMode'] ?? ThemeMode.system.index) as int];
-        _themeIndex = (state['themeIndex'] ?? 0) as int;
-        _isAuthenticated = state['isAuthenticated'] ?? false;
-        _username = state['username'];
-        _email = state['email'];
-        _photoUrl = state['photoUrl'];
-        _isProUser = state['isProUser'] ?? false;
-        setAppCurrency(_profile.currencySymbol);
+        final state = jsonDecode(raw) as Map<String, dynamic>;
+        _profile = UserProfile.fromJson(
+            (state['profile'] as Map<String, dynamic>?) ?? const {});
+        final storedModeIndex = (state['themeMode'] as int?) ?? ThemeMode.dark.index;
+        _themeMode = storedModeIndex == ThemeMode.light.index
+            ? ThemeMode.light
+            : ThemeMode.dark;
+        _username = state['username'] as String?;
+        _email = state['email'] as String?;
+        _photoUrl = state['photoUrl'] as String?;
+        _lastSymbol = state['lastSymbol'] as String? ?? 'BTCUSDT';
+        _dashboardSymbol = state['dashboardSymbol'] as String? ?? 'BTCUSDT';
       }
-    } catch (_) {}
+    } catch (e) {
+      Logger.instance.warning('AppState load failed: $e');
+    }
+
+    _isAuthenticated = false;
     _loaded = true;
     notifyListeners();
   }
@@ -82,151 +98,72 @@ class AppState extends ChangeNotifier {
       await _persistence.writeString(
         _key,
         jsonEncode({
-          'profile':    _profile.toJson(),
-          'themeMode':  _themeMode.index,
-          'themeIndex': _themeIndex,
-          'isAuthenticated': _isAuthenticated,
+          'profile': _profile.toJson(),
+          'themeMode': _themeMode.index,
           'username': _username,
           'email': _email,
           'photoUrl': _photoUrl,
-          'isProUser': _isProUser,
+          'lastSymbol': _lastSymbol,
+          'dashboardSymbol': _dashboardSymbol,
         }),
       );
-    } catch (_) {}
-  }
-
-  // --- REAL GOOGLE SIGN-IN ---
-  Future<bool> signInWithGoogle() async {
-    try {
-      final account = await _googleSignIn.signIn();
-      if (account != null) {
-        _isAuthenticated = true;
-        _username = account.displayName ?? 'Google Trader';
-        _email = account.email;
-        _photoUrl = account.photoUrl;
-        await _save();
-
-        // 1. Authenticate with Supabase using Google ID Token
-        final authentication = await account.authentication;
-        final idToken = authentication.idToken;
-        final accessToken = authentication.accessToken;
-        
-        try {
-          if (idToken != null) {
-            await Supabase.instance.client.auth.signInWithIdToken(
-              provider: OAuthProvider.google,
-              idToken: idToken,
-              accessToken: accessToken,
-            );
-          } else {
-            Logger.instance.error(
-              'Google Sign-In returned a null ID Token! Make sure you replaced AuthConfig.googleWebClientId with your real Web Client ID.'
-            );
-          }
-        } catch (supabaseErr) {
-          Logger.instance.error('Supabase authentication failed: $supabaseErr');
-        }
-
-        // 2. Local Profile Record & Migration Triggers
-        final userId = Supabase.instance.client.auth.currentUser?.id ?? 'guest';
-        if (userId != 'guest') {
-          final db = SqliteDbHelper.instance;
-          final profileMap = {
-            'user_id': userId,
-            'display_name': _username,
-            'email': _email,
-            'photo_url': account.photoUrl,
-            'joined_at': DateTime.now().toIso8601String(),
-            'last_login': DateTime.now().toIso8601String(),
-            'account_type': 'Registered',
-          };
-          await db.insert('profiles', profileMap);
-          await SyncCoordinator.instance.enqueue('profiles', 'INSERT', userId, profileMap);
-
-          // 3. Resolve Guest to Cloud Migration Sync
-          bool hasBackup = false;
-          try {
-            final profileRes = await Supabase.instance.client
-                .from('profiles')
-                .select()
-                .eq('user_id', userId)
-                .maybeSingle();
-            if (profileRes != null) {
-              hasBackup = true;
-            }
-          } catch (_) {}
-
-          if (hasBackup) {
-            await SyncCoordinator.instance.syncDownAll(userId);
-          } else {
-            await SyncCoordinator.instance.migrateGuestToCloud(userId);
-          }
-        }
-
-        notifyListeners();
-        return true;
-      }
     } catch (e) {
-      Logger.instance.error('Real Google sign in failed: $e');
+      Logger.instance.warning('AppState save failed: $e');
     }
-    return false;
   }
+
+  // ==========================================================
+  // AUTH (Local mode)
+  // ==========================================================
 
   Future<void> signOut() async {
-    try {
-      await _googleSignIn.signOut();
-    } catch (_) {}
-    try {
-      await Supabase.instance.client.auth.signOut();
-    } catch (_) {}
-    try {
-      await SqliteDbHelper.instance.clearAllData();
-    } catch (_) {}
-    
     _isAuthenticated = false;
     _username = null;
     _email = null;
-    _isProUser = false; // reset premium
-    _profile.onboarded = false; // go back to onboarding setup or main screen
+    _photoUrl = null;
     await _save();
     notifyListeners();
   }
 
-  void toggleProSubscription() {
-    // Subscription UI only ("Coming Soon"), no-op
+  /// Explicit destructive reset, triggered only from Settings behind a
+  /// confirmation dialog.
+  Future<void> clearLocalData() async {
+    try {
+      await SqliteDbHelper.instance.clearAllData();
+    } catch (e) {
+      Logger.instance.error('Clearing local data failed: $e');
+    }
+    notifyListeners();
   }
 
-  void completeOnboarding({
-    required Experience experience,
-    required Set<String> markets,
-    required TradingStyle style,
-    required double startingCapital,
-    required String currencySymbol,
-  }) {
-    _profile
-      ..onboarded = true
-      ..experience = experience
-      ..markets = markets
-      ..style = style
-      ..startingCapital = startingCapital
-      ..currencySymbol = currencySymbol;
-    setAppCurrency(currencySymbol);
+  // ==========================================================
+  // PREFERENCES
+  // ==========================================================
+
+  void completeOnboarding() {
+    _profile.onboarded = true;
     _save();
     notifyListeners();
   }
 
+  void setTraderType(String type) {
+    _profile.traderType = type;
+    _save();
+    notifyListeners();
+  }
+
+  void setFavoriteCoins(List<String> coins) {
+    _profile.favoriteCoins = coins.take(5).toList();
+    _save();
+    notifyListeners();
+  }
+
+  /// Only [ThemeMode.light] and [ThemeMode.dark] are supported.
   void setThemeMode(ThemeMode mode) {
+    if (mode != ThemeMode.light && mode != ThemeMode.dark) return;
     _themeMode = mode;
     _save();
     notifyListeners();
-  }
-
-  void setThemeIndex(int index) {
-    if (index >= 0 && index < 5) {
-      _themeIndex = index;
-      _save();
-      notifyListeners();
-    }
   }
 
   void setHaptics(bool enabled) {
@@ -235,77 +172,149 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setJournalPrompts(bool enabled) {
-    _profile.journalPromptsEnabled = enabled;
+  void setDefaultTimeframe(String apiValue) {
+    _profile.defaultTimeframe = apiValue;
     _save();
     notifyListeners();
   }
 
-  void updateProfile({
-    Experience? experience,
-    Set<String>? markets,
-    TradingStyle? style,
-    String? currencySymbol,
-  }) {
-    if (experience != null) _profile.experience = experience;
-    if (markets != null) _profile.markets = markets;
-    if (style != null) _profile.style = style;
-    if (currencySymbol != null) {
-      _profile.currencySymbol = currencySymbol;
-      setAppCurrency(currencySymbol);
-    }
+  void setChartTypePref(ChartTypePref type) {
+    _profile.chartType = type;
     _save();
     notifyListeners();
   }
 
-  /// Wipes onboarding so the intro flow shows again (used by Settings).
-  Future<void> resetOnboarding() async {
-    _profile = UserProfile();
-    _themeMode = ThemeMode.system;
-    _themeIndex = 0;
-    _isAuthenticated = false;
-    _username = null;
-    _email = null;
-    _photoUrl = null;
-    _isProUser = false;
-    setAppCurrency(_profile.currencySymbol);
-    await _save();
+  void setGridStyle(GridStylePref style) {
+    _profile.gridStyle = style;
+    _save();
     notifyListeners();
   }
 
-  /// Updates the user's profile display name and profile picture avatar.
-  Future<void> updateDisplayDetails({required String displayName, required String photoUrl}) async {
+  void setGridVisibility(GridVisibilityPref v) {
+    _profile.gridVisibility = v;
+    _save();
+    notifyListeners();
+  }
+
+  void setGridDensity(GridDensityPref d) {
+    _profile.gridDensity = d;
+    _save();
+    notifyListeners();
+  }
+
+
+
+  void setCandleColors({int? bullish, int? bearish}) {
+    if (bullish != null) _profile.customBullishColorValue = bullish;
+    if (bearish != null) _profile.customBearishColorValue = bearish;
+    _save();
+    notifyListeners();
+  }
+
+  void setShowVolume(bool show) {
+    _profile.showVolume = show;
+    _save();
+    notifyListeners();
+  }
+
+  void setRightOffsetPercent(double percent) {
+    _profile.rightOffsetPercent = percent;
+    _save();
+    notifyListeners();
+  }
+
+
+
+  void setSessionConfig(SessionOverlayConfig config) {
+    _profile.sessionConfig = config;
+    _save();
+    notifyListeners();
+  }
+
+  /// Remember the last charted symbol. Deliberately does not notify: this is
+  /// written while a chart opens and would otherwise rebuild the whole tree.
+  void setLastSymbol(String symbol) {
+    if (_lastSymbol == symbol) return;
+    _lastSymbol = symbol;
+    _save();
+  }
+
+  /// Change the symbol previewed on the Dashboard tab. Notifies, since the
+  /// Dashboard screen depends on this to know which coin to show.
+  void setDashboardSymbol(String symbol) {
+    if (_dashboardSymbol == symbol) return;
+    _dashboardSymbol = symbol;
+    _save();
+    notifyListeners();
+  }
+
+  void setDefaultIndicators(Set<String> names) {
+    _profile.defaultIndicators = names;
+    _save();
+    notifyListeners();
+  }
+
+  /// Up to 3 tools shown on the chart's quick-action toolbar.
+  void setFavoriteDrawingTools(List<String> toolNames) {
+    _profile.favoriteDrawingTools = toolNames.take(3).toList();
+    _save();
+    notifyListeners();
+  }
+
+  void setCrosshairMode(CrosshairMode mode) {
+    _profile.crosshairMode = mode;
+    _save();
+    notifyListeners();
+  }
+
+  void setCrosshairShowLabels(bool show) {
+    _profile.crosshairShowLabels = show;
+    _save();
+    notifyListeners();
+  }
+
+  void setAutoScale(bool enabled) {
+    _profile.autoScale = enabled;
+    _save();
+    notifyListeners();
+  }
+
+  void setChartLocked(bool locked) {
+    _profile.chartLocked = locked;
+    _save();
+    notifyListeners();
+  }
+
+  void addCustomPriceLine(double price) {
+    if (_profile.customPriceLines.length >= 10) return;
+    _profile.customPriceLines.add(price);
+    _save();
+    notifyListeners();
+  }
+
+  void removeCustomPriceLine(double price) {
+    _profile.customPriceLines.remove(price);
+    _save();
+    notifyListeners();
+  }
+
+  void clearCustomPriceLines() {
+    _profile.customPriceLines.clear();
+    _save();
+    notifyListeners();
+  }
+
+  Future<void> updateDisplayName(String displayName) async {
     _username = displayName;
-    _photoUrl = photoUrl;
     await _save();
+    notifyListeners();
+  }
 
-    final userId = Supabase.instance.client.auth.currentUser?.id ?? 'guest';
-    if (userId != 'guest') {
-      final db = SqliteDbHelper.instance;
-      final existing = await db.query('profiles', where: 'user_id = ?', whereArgs: [userId]);
-      final String joinedAt = existing.isNotEmpty ? (existing.first['joined_at'] as String) : DateTime.now().toIso8601String();
-      final String lastLogin = existing.isNotEmpty ? (existing.first['last_login'] as String) : DateTime.now().toIso8601String();
-      final String accountType = existing.isNotEmpty ? (existing.first['account_type'] as String) : 'Registered';
-      final String email = existing.isNotEmpty ? (existing.first['email'] as String) : (_email ?? '');
-      final String country = existing.isNotEmpty ? (existing.first['country'] as String? ?? '') : '';
-
-      final profileMap = {
-        'user_id': userId,
-        'display_name': displayName,
-        'email': email,
-        'photo_url': photoUrl,
-        'country': country,
-        'joined_at': joinedAt,
-        'last_login': lastLogin,
-        'account_type': accountType,
-      };
-
-      // Replace locally
-      await db.insert('profiles', profileMap);
-
-      // Enqueue sync operation to Supabase
-      await SyncCoordinator.instance.enqueue('profiles', 'INSERT', userId, profileMap);
-    }
+  /// Reset preferences and show onboarding again. Does not delete chart data.
+  Future<void> resetPreferences() async {
+    _profile = UserProfile();
+    _themeMode = ThemeMode.dark;
+    await _save();
     notifyListeners();
   }
 }

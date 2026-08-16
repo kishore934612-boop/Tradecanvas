@@ -1,7 +1,7 @@
 import 'package:flutter/services.dart';
 
-/// Thin wrapper around [HapticFeedback] that can be globally toggled off via
-/// the Settings screen. The [SettingsProvider] keeps [enabled] in sync.
+/// Thin wrapper around [HapticFeedback] that can be globally toggled off from
+/// Settings. `AppState` keeps [enabled] in sync with the stored preference.
 class Haptics {
   Haptics._();
 

@@ -88,6 +88,7 @@ class FileLogger extends AppLogger {
   @override
   void log(LogLevel level, String message, [Object? error, StackTrace? stackTrace]) {
     super.log(level, message, error, stackTrace);
+    if (kIsWeb) return;
     final timestamp = DateTime.now().toIso8601String().substring(11, 23);
     final prefix = level.prefix;
     final levelName = level.name.padRight(5);

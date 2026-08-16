@@ -14,9 +14,9 @@ class GlassCard extends StatelessWidget {
   const GlassCard({
     super.key,
     required this.child,
-    this.padding = const EdgeInsets.all(16.0),
+    this.padding = const EdgeInsets.symmetric(horizontal: 12.0, vertical: 10.0),
     this.margin,
-    this.radius = 12.0,
+    this.radius = 10.0,
     this.onTap,
     this.color,
     this.borderColor,
@@ -51,15 +51,17 @@ class GlassCard extends StatelessWidget {
   }
 }
 
-/// Standardised large screen header (title + optional trailing action).
+/// Standardised large screen header (title + optional leading/trailing action).
 class ScreenHeader extends StatelessWidget {
   final String title;
+  final Widget? leading;
   final Widget? trailing;
   final bool showBackButton;
 
   const ScreenHeader({
     super.key,
     required this.title,
+    this.leading,
     this.trailing,
     this.showBackButton = false,
   });
@@ -93,6 +95,11 @@ class ScreenHeader extends StatelessWidget {
                 margin: const EdgeInsets.only(right: 12.0),
                 child: Icon(Icons.arrow_back_rounded, color: colors.foreground, size: 24.0),
               ),
+            ),
+          ] else if (leading != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(right: 10.0),
+              child: leading!,
             ),
           ],
           Expanded(
@@ -159,6 +166,234 @@ class PillButton extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class CoinMeta {
+  final String symbol;
+  final String badgeText;
+  final Color primaryColor;
+  final List<Color>? gradient;
+
+  const CoinMeta({
+    required this.symbol,
+    required this.badgeText,
+    required this.primaryColor,
+    this.gradient,
+  });
+
+  static const Map<String, CoinMeta> registry = {
+    'BTC': CoinMeta(
+      symbol: 'BTC',
+      badgeText: '₿',
+      primaryColor: Color(0xFFF7931A),
+    ),
+    'ETH': CoinMeta(
+      symbol: 'ETH',
+      badgeText: 'Ξ',
+      primaryColor: Color(0xFF627EEA),
+    ),
+    'USDT': CoinMeta(
+      symbol: 'USDT',
+      badgeText: '₮',
+      primaryColor: Color(0xFF26A17B),
+    ),
+    'USDC': CoinMeta(
+      symbol: 'USDC',
+      badgeText: '\$',
+      primaryColor: Color(0xFF2775CA),
+    ),
+    'SOL': CoinMeta(
+      symbol: 'SOL',
+      badgeText: 'S',
+      primaryColor: Color(0xFF9945FF),
+      gradient: [Color(0xFF14F195), Color(0xFF9945FF)],
+    ),
+    'BNB': CoinMeta(
+      symbol: 'BNB',
+      badgeText: '❖',
+      primaryColor: Color(0xFFF3BA2F),
+    ),
+    'XRP': CoinMeta(
+      symbol: 'XRP',
+      badgeText: '✕',
+      primaryColor: Color(0xFF23292F),
+    ),
+    'ADA': CoinMeta(
+      symbol: 'ADA',
+      badgeText: '₳',
+      primaryColor: Color(0xFF0033AD),
+    ),
+    'DOGE': CoinMeta(
+      symbol: 'DOGE',
+      badgeText: 'Ð',
+      primaryColor: Color(0xFFC2A633),
+    ),
+    'AVAX': CoinMeta(
+      symbol: 'AVAX',
+      badgeText: 'A',
+      primaryColor: Color(0xFFE84142),
+    ),
+    'DOT': CoinMeta(
+      symbol: 'DOT',
+      badgeText: 'P',
+      primaryColor: Color(0xFFE6007A),
+    ),
+    'LINK': CoinMeta(
+      symbol: 'LINK',
+      badgeText: '⬡',
+      primaryColor: Color(0xFF375BD2),
+    ),
+    'LTC': CoinMeta(
+      symbol: 'LTC',
+      badgeText: 'Ł',
+      primaryColor: Color(0xFF345D9D),
+    ),
+    'SHIB': CoinMeta(
+      symbol: 'SHIB',
+      badgeText: 'S',
+      primaryColor: Color(0xFFFFA409),
+    ),
+    'MATIC': CoinMeta(
+      symbol: 'MATIC',
+      badgeText: 'M',
+      primaryColor: Color(0xFF8247E5),
+    ),
+  };
+
+  static CoinMeta getFor(String symbol) {
+    final clean = symbol
+        .toUpperCase()
+        .replaceAll('USDT', '')
+        .replaceAll('BUSD', '')
+        .replaceAll('USD', '');
+    if (registry.containsKey(clean)) return registry[clean]!;
+    if (registry.containsKey(symbol.toUpperCase())) {
+      return registry[symbol.toUpperCase()]!;
+    }
+
+    final fallbackColor = colorForSymbol(symbol);
+    return CoinMeta(
+      symbol: clean,
+      badgeText: clean.isNotEmpty ? clean[0] : '?',
+      primaryColor: fallbackColor,
+    );
+  }
+}
+
+/// Round, colorful initial-letter avatar for a trading symbol. Gives every
+/// watchlist/search row a distinct identity color instead of a flat icon.
+class SymbolAvatar extends StatelessWidget {
+  final String label;
+  final Color color;
+  final double size;
+
+  const SymbolAvatar({
+    super.key,
+    required this.label,
+    required this.color,
+    this.size = 36.0,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final meta = CoinMeta.getFor(label);
+    final clean = meta.symbol.toLowerCase();
+    final bgColors = meta.gradient ??
+        [meta.primaryColor, meta.primaryColor.withValues(alpha: 0.8)];
+
+    final fallbackBadge = Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          colors: bgColors,
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.25),
+          width: 1.0,
+        ),
+      ),
+      child: Text(
+        meta.badgeText,
+        style: TextStyle(
+          fontSize: size * (meta.badgeText.length > 2 ? 0.32 : 0.44),
+          fontWeight: FontWeight.w900,
+          color: meta.primaryColor == const Color(0xFFFFFFFF)
+              ? Colors.black
+              : Colors.white,
+        ),
+      ),
+    );
+
+    if (clean.isEmpty) return fallbackBadge;
+
+    final iconUrl = 'https://assets.coincap.io/assets/icons/$clean@2x.png';
+
+    return SizedBox(
+      width: size,
+      height: size,
+      child: ClipOval(
+        child: Image.network(
+          iconUrl,
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          errorBuilder: (context, error, stackTrace) => fallbackBadge,
+          loadingBuilder: (context, child, loadingProgress) {
+            if (loadingProgress == null) return child;
+            return fallbackBadge;
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/// Small rounded-square icon badge with a gradient fill — used to give
+/// settings rows / section headers a colorful anchor instead of a plain
+/// muted-colored icon.
+class GradientIconBadge extends StatelessWidget {
+  final IconData icon;
+  final List<Color> colors;
+  final double size;
+  final double iconSize;
+
+  const GradientIconBadge({
+    super.key,
+    required this.icon,
+    required this.colors,
+    this.size = 36.0,
+    this.iconSize = 18.0,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: colors,
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(size * 0.32),
+        boxShadow: [
+          BoxShadow(
+            color: colors.first.withValues(alpha: 0.35),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Icon(icon, size: iconSize, color: Colors.white),
     );
   }
 }

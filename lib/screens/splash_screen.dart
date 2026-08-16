@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:app/constants/colors.dart';
@@ -51,16 +53,16 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
     
     if (!mounted) return;
 
-    Navigator.of(context).pushReplacement(
+    unawaited(Navigator.of(context).pushReplacement(
       PageRouteBuilder(
         pageBuilder: (context, animation, secondaryAnimation) =>
-            appState.onboarded ? MainTabsScreen(key: mainTabsKey) : const OnboardingScreen(),
+            appState.onboarded ? const MainTabsScreen() : const OnboardingScreen(),
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
           return FadeTransition(opacity: animation, child: child);
         },
         transitionDuration: const Duration(milliseconds: 400),
       ),
-    );
+    ));
   }
 
   Future<void> _waitForLoad(AppState appState) async {
@@ -83,18 +85,29 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
       body: Stack(
         alignment: Alignment.center,
         children: [
-          // Background subtle ambient glow
-          Positioned(
-            top: -100,
-            child: Container(
-              width: 300,
-              height: 300,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: colors.primary.withValues(alpha: 0.12),
+          // Background ambient color blobs — multi-hue instead of a single
+          // flat tint, so the splash feels vivid rather than monochrome.
+          for (final entry in colors.ambientGlow.asMap().entries)
+            Positioned(
+              top: -120.0 + entry.key * 40,
+              left: entry.key.isEven ? -80.0 : null,
+              right: entry.key.isOdd ? -80.0 : null,
+              child: IgnorePointer(
+                child: Container(
+                  width: 260,
+                  height: 260,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(
+                      colors: [
+                        entry.value.withValues(alpha: 0.18),
+                        entry.value.withValues(alpha: 0.0),
+                      ],
+                    ),
+                  ),
+                ),
               ),
             ),
-          ),
           Center(
             child: AnimatedBuilder(
               animation: _controller,
@@ -123,10 +136,12 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                               height: 86.0,
                               fit: BoxFit.cover,
                               errorBuilder: (context, error, stackTrace) {
-                                return const Icon(
+                                return Icon(
                                   Icons.query_stats_rounded,
                                   size: 44.0,
-                                  color: Colors.black,
+                                  color: colors.brightness == Brightness.dark
+                                      ? Colors.black
+                                      : Colors.white,
                                 );
                               },
                             ),
@@ -135,7 +150,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                         const SizedBox(height: 24.0),
                         // App Name
                         Text(
-                          'TradeVerse',
+                          'TradeCanvas',
                           style: TextStyle(
                             fontSize: 34.0,
                             fontWeight: FontWeight.bold,
@@ -146,7 +161,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
                         const SizedBox(height: 8.0),
                         // Subtitle
                         Text(
-                          'Trade Smarter. Learn Faster.',
+                          'Live charts. Every pair.',
                           style: TextStyle(
                             fontSize: 14.0,
                             color: colors.mutedForeground,

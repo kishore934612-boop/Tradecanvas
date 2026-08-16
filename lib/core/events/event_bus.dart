@@ -20,11 +20,12 @@ class EventBus {
   static final EventBus _instance = EventBus._();
   static EventBus get instance => _instance;
   
-  final Map<Type, StreamController> _controllers = {};
-  final Map<Type, Stream> _streams = {};
+  final Map<Type, StreamController<AppEvent>> _controllers = {};
+  final Map<Type, Stream<AppEvent>> _streams = {};
   
   /// Publish an event
   void publish<T extends AppEvent>(T event) {
+    // ignore: close_sinks — controllers are owned by the bus and closed in dispose()
     final controller = _getController<T>();
     // Deliver events asynchronously to keep the main isolate responsive
     Future.microtask(() => controller.add(event));
@@ -43,20 +44,21 @@ class EventBus {
     return _getStream<T>().cast<T>();
   }
   
-  /// Get or create controller for event type
-  StreamController _getController<T extends AppEvent>() {
-    if (!_controllers.containsKey(T)) {
-      _controllers[T] = StreamController<T>.broadcast(sync: true);
-    }
-    return _controllers[T]!;
+  /// Get or create controller for event type.
+  ///
+  /// Controllers are intentionally long-lived: the bus is a process-wide
+  /// singleton, and they are released together in [dispose].
+  // ignore: close_sinks
+  StreamController<AppEvent> _getController<T extends AppEvent>() {
+    return _controllers.putIfAbsent(
+      T,
+      () => StreamController<AppEvent>.broadcast(sync: true),
+    );
   }
-  
+
   /// Get or create stream for event type
-  Stream _getStream<T extends AppEvent>() {
-    if (!_streams.containsKey(T)) {
-      _streams[T] = _getController<T>().stream;
-    }
-    return _streams[T]!;
+  Stream<AppEvent> _getStream<T extends AppEvent>() {
+    return _streams.putIfAbsent(T, () => _getController<T>().stream);
   }
   
   /// Dispose all controllers

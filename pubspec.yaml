@@ -1,5 +1,5 @@
 name: app
-description: "A new Flutter project."
+description: "Charty — live candlestick charts, indicators and drawing tools for Binance spot markets."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -37,16 +37,14 @@ dependencies:
   provider: ^6.1.2
   shared_preferences: ^2.3.2
   google_fonts: ^6.2.1
-  syncfusion_flutter_charts: ^33.2.15
-  webview_flutter: ^4.14.0
-  webview_flutter_web: ^0.2.3+4
   http: ^1.6.0
   web_socket_channel: ^3.0.1
   path_provider: ^2.1.6
-  google_sign_in: ^6.2.1
   sqflite: ^2.4.1
-  supabase_flutter: ^2.8.0
+  sqflite_common_ffi: ^2.3.4
+  sqflite_common_ffi_web: ^0.4.5
   path: ^1.9.1
+  share_plus: ^13.3.0
 
 dev_dependencies:
   flutter_test:
@@ -60,6 +58,10 @@ flutter_launcher_icons:
   android: "launcher_icon"
   ios: true
   image_path: "assets/icon.png"
+  web:
+    generate: true
+    image_path: "assets/icon.png"
+
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

@@ -1,11 +1,11 @@
 {
-    "name": "app",
-    "short_name": "app",
+    "name": "TradeCanvas",
+    "short_name": "TradeCanvas",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "Live candlestick charts, indicators and drawing tools for Binance spot markets.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

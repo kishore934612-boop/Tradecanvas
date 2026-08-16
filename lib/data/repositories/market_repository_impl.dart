@@ -19,7 +19,7 @@ class MarketRepositoryImpl implements MarketRepository {
   final StreamController<PriceUpdate> _priceUpdateController =
       StreamController<PriceUpdate>.broadcast();
 
-  StreamSubscription? _binanceSubscription;
+  StreamSubscription<PriceUpdate>? _binanceSubscription;
   bool _isInitialized = false;
 
   MarketRepositoryImpl({
@@ -121,7 +121,7 @@ class MarketRepositoryImpl implements MarketRepository {
   @override
   Future<Result<Map<String, PriceData>>> getPrices(List<String> symbols) async {
     if (symbols.isEmpty) {
-      return Result.success({});
+      return const Result.success({});
     }
 
     try {

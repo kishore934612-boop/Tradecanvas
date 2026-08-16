@@ -1,436 +1,278 @@
+/// SQLite-backed repositories for Charty.
+///
+/// Every write also enqueues a sync mutation so signed-in users get cloud
+/// backup. Enqueue is a no-op while signed out.
+library;
+
 import 'dart:convert';
-import 'package:app/services/persistence/sqlite_db_helper.dart';
-import 'package:app/models/trading_models.dart';
-import 'package:app/domain/repositories/portfolio_repository.dart';
-import 'package:app/domain/repositories/position_repository.dart';
-import 'package:app/domain/repositories/trade_repository.dart';
-import 'package:app/domain/repositories/learning_repository.dart';
+
+import 'package:app/core/logging/logger.dart';
+import 'package:app/domain/repositories/chart_prefs_repository.dart';
+import 'package:app/domain/repositories/drawing_repository.dart';
 import 'package:app/domain/repositories/watchlist_repository.dart';
-import 'package:app/domain/repositories/statistics_repository.dart';
-import 'package:app/constants/markets.dart';
+import 'package:app/models/drawing.dart';
+import 'package:app/services/persistence/sqlite_db_helper.dart';
+import 'package:app/services/session.dart';
+import 'package:app/services/sync/sync_coordinator.dart';
 
 // -----------------------------------------------------------------
-// 1. PORTFOLIO REPOSITORY
-// -----------------------------------------------------------------
-class SqlitePortfolioRepository implements PortfolioRepository {
-  final SqliteDbHelper _db = SqliteDbHelper.instance;
-
-  @override
-  Future<double> getInitialBalance(String userId) async {
-    final res = await _db.query('portfolio', where: 'user_id = ?', whereArgs: [userId]);
-    if (res.isEmpty) return 100000.0;
-    return (res.first['initial_balance'] as num).toDouble();
-  }
-
-  @override
-  Future<double> getAvailableBalance(String userId) async {
-    final res = await _db.query('portfolio', where: 'user_id = ?', whereArgs: [userId]);
-    if (res.isEmpty) return 100000.0;
-    return (res.first['available_balance'] as num).toDouble();
-  }
-
-  @override
-  Future<void> saveBalances(String userId, double initial, double available) async {
-    await _db.insert('portfolio', {
-      'user_id': userId,
-      'initial_balance': initial,
-      'available_balance': available,
-      'updated_at': DateTime.now().toIso8601String(),
-    });
-  }
-
-  @override
-  Future<void> clearPortfolio(String userId) async {
-    await _db.delete('portfolio', 'user_id = ?', [userId]);
-  }
-}
-
-// -----------------------------------------------------------------
-// 2. POSITION REPOSITORY
-// -----------------------------------------------------------------
-class SqlitePositionRepository implements PositionRepository {
-  final SqliteDbHelper _db = SqliteDbHelper.instance;
-
-  @override
-  Future<List<Position>> getPositions(String userId) async {
-    final res = await _db.query('positions', where: 'user_id = ?', whereArgs: [userId]);
-    return res.map((row) {
-      return Position(
-        id: row['position_id'] as String,
-        symbol: row['symbol'] as String,
-        side: sideFromId(row['direction'] as String? ?? 'long'),
-        qty: (row['quantity'] as num).toDouble(),
-        entryPrice: (row['entry_price'] as num).toDouble(),
-        leverage: (row['leverage'] as num? ?? 1.0).toDouble(),
-        margin: (row['margin'] as num).toDouble(),
-        fees: 0.0,
-        openedAt: DateTime.parse(row['opened_at'] as String).millisecondsSinceEpoch,
-        marketType: marketTypeFromId(row['market_type'] as String? ?? 'crypto') ?? MarketType.crypto,
-        tradingType: row['market_type'] == 'futures' ? TradingType.futures : TradingType.spot,
-        stopLoss: (row['stop_loss'] as num?)?.toDouble(),
-        takeProfit: (row['take_profit'] as num?)?.toDouble(),
-      );
-    }).toList();
-  }
-
-  @override
-  Future<void> addPosition(String userId, Position p) async {
-    await _db.insert('positions', {
-      'position_id': p.id,
-      'user_id': userId,
-      'symbol': p.symbol,
-      'market_type': p.tradingType.id,
-      'entry_price': p.entryPrice,
-      'quantity': p.qty,
-      'leverage': p.leverage,
-      'margin': p.margin,
-      'direction': p.side.id,
-      'stop_loss': p.stopLoss,
-      'take_profit': p.takeProfit,
-      'opened_at': DateTime.fromMillisecondsSinceEpoch(p.openedAt).toIso8601String(),
-    });
-  }
-
-  @override
-  Future<void> updatePosition(String userId, Position p) async {
-    await _db.update(
-      'positions',
-      {
-        'quantity': p.qty,
-        'entry_price': p.entryPrice,
-        'margin': p.margin,
-        'stop_loss': p.stopLoss,
-        'take_profit': p.takeProfit,
-      },
-      'position_id = ? AND user_id = ?',
-      [p.id, userId],
-    );
-  }
-
-  @override
-  Future<void> removePosition(String userId, String positionId) async {
-    await _db.delete('positions', 'position_id = ? AND user_id = ?', [positionId, userId]);
-  }
-
-  @override
-  Future<void> clearPositions(String userId) async {
-    await _db.delete('positions', 'user_id = ?', [userId]);
-  }
-}
-
-// -----------------------------------------------------------------
-// 3. TRADE REPOSITORY
-// -----------------------------------------------------------------
-class SqliteTradeRepository implements TradeRepository {
-  final SqliteDbHelper _db = SqliteDbHelper.instance;
-
-  @override
-  Future<List<Trade>> getTrades(String userId) async {
-    final res = await _db.query('trades', where: 'user_id = ?', whereArgs: [userId], orderBy: 'closed_at DESC');
-    return res.map((row) {
-      final entryJ = row['entry_journal'] != null && (row['entry_journal'] as String).isNotEmpty
-          ? EntryJournal.fromJson(jsonDecode(row['entry_journal'] as String))
-          : null;
-      final exitJ = row['exit_journal'] != null && (row['exit_journal'] as String).isNotEmpty
-          ? ExitJournal.fromJson(jsonDecode(row['exit_journal'] as String))
-          : null;
-
-      return Trade(
-        id: row['trade_id'] as String,
-        symbol: row['symbol'] as String,
-        name: row['symbol'] as String,
-        side: sideFromId(row['direction'] as String? ?? 'long'),
-        qty: (row['quantity'] as num).toDouble(),
-        entryPrice: (row['entry_price'] as num).toDouble(),
-        exitPrice: (row['exit_price'] as num).toDouble(),
-        leverage: (row['leverage'] as num? ?? 1.0).toDouble(),
-        fees: (row['entry_fee'] as num? ?? 0.0).toDouble() + (row['exit_fee'] as num? ?? 0.0).toDouble(),
-        openedAt: DateTime.parse(row['opened_at'] as String).millisecondsSinceEpoch,
-        closedAt: DateTime.parse(row['closed_at'] as String).millisecondsSinceEpoch,
-        pnl: (row['realized_pnl'] as num).toDouble(),
-        pnlPct: (row['return_pct'] as num).toDouble(),
-        marketType: MarketType.crypto,
-        tradingType: row['market_type'] == 'futures' ? TradingType.futures : TradingType.spot,
-        closeReason: row['closed_reason'] as String? ?? 'manual',
-        entryJournal: entryJ,
-        exitJournal: exitJ,
-        notes: row['notes'] as String? ?? '',
-      );
-    }).toList();
-  }
-
-  @override
-  Future<void> addTrade(String userId, Trade t) async {
-    // Determine order type and fee structures
-    final double entryFee = t.fees / 2;
-    final double exitFee = t.fees / 2;
-
-    await _db.insert('trades', {
-      'trade_id': t.id,
-      'user_id': userId,
-      'symbol': t.symbol,
-      'market_type': t.tradingType.id,
-      'direction': t.side.id,
-      'entry_price': t.entryPrice,
-      'exit_price': t.exitPrice,
-      'quantity': t.qty,
-      'leverage': t.leverage,
-      'entry_fee': entryFee,
-      'exit_fee': exitFee,
-      'realized_pnl': t.pnl,
-      'return_pct': t.pnlPct,
-      'duration': (t.durationMs / 1000).round(),
-      'closed_reason': t.closeReason,
-      'order_type': 'market', // default metadata
-      'trade_status': t.closeReason == 'liquidation' ? 'liquidated' : 'closed',
-      'opened_at': DateTime.fromMillisecondsSinceEpoch(t.openedAt).toIso8601String(),
-      'closed_at': DateTime.fromMillisecondsSinceEpoch(t.closedAt).toIso8601String(),
-    });
-
-    // Write accompanying journal details directly to journal_entries row
-    if (t.exitJournal != null || t.entryJournal != null || t.notes.isNotEmpty) {
-      await _db.insert('journal_entries', {
-        'journal_id': '${t.id}_journal',
-        'user_id': userId,
-        'trade_id': t.id,
-        'title': '${t.symbol} Trade Journal',
-        'notes': t.notes,
-        'emotion': t.exitJournal?.emotionalState ?? '',
-        'mistakes': t.exitJournal?.whatWentWrong ?? '',
-        'lessons': t.exitJournal?.lessonsLearned ?? '',
-        'rating': t.exitJournal != null ? 5 : 0,
-        'tags': '[]',
-        'screenshots': '[]',
-        'strategy': t.entryJournal?.strategy ?? '',
-        'created_at': DateTime.fromMillisecondsSinceEpoch(t.closedAt).toIso8601String(),
-      });
-    }
-  }
-
-  @override
-  Future<void> updateTradeJournal(String userId, String tradeId, ExitJournal journal) async {
-    // Retrieve trade for closed time reference
-    final rows = await _db.query('trades', where: 'trade_id = ? AND user_id = ?', whereArgs: [tradeId, userId]);
-    final String timeStr = rows.isNotEmpty ? rows.first['closed_at'] as String : DateTime.now().toIso8601String();
-
-    await _db.insert('journal_entries', {
-      'journal_id': '${tradeId}_journal',
-      'user_id': userId,
-      'trade_id': tradeId,
-      'title': 'Trade Reflection',
-      'emotion': journal.emotionalState,
-      'mistakes': journal.whatWentWrong,
-      'lessons': journal.lessonsLearned,
-      'rating': 5,
-      'tags': '[]',
-      'screenshots': '[]',
-      'created_at': timeStr,
-    });
-  }
-
-  @override
-  Future<void> updateTradeNotes(String userId, String tradeId, String notes) async {
-    await _db.execute(
-      'UPDATE journal_entries SET notes = ? WHERE trade_id = ? AND user_id = ?',
-      [notes, tradeId, userId],
-    );
-  }
-
-  @override
-  Future<void> clearTrades(String userId) async {
-    await _db.delete('trades', 'user_id = ?', [userId]);
-    await _db.delete('journal_entries', 'user_id = ?', [userId]);
-  }
-}
-
-// -----------------------------------------------------------------
-// 4. LEARNING REPOSITORY
-// -----------------------------------------------------------------
-class SqliteLearningRepository implements LearningRepository {
-  final SqliteDbHelper _db = SqliteDbHelper.instance;
-
-  @override
-  Future<void> saveProgress(
-    String userId,
-    String lessonId, {
-    required bool completed,
-    int? completionTime,
-    int? quizScore,
-    String? lastOpened,
-  }) async {
-    await _db.insert('learning_progress', {
-      'user_id': userId,
-      'lesson_id': lessonId,
-      'completed': completed ? 1 : 0,
-      'completion_time': completionTime,
-      'quiz_score': quizScore,
-      'last_opened': lastOpened,
-      'updated_at': DateTime.now().toIso8601String(),
-    });
-  }
-
-  @override
-  Future<Map<String, dynamic>> getProgress(String userId) async {
-    final res = await _db.query('learning_progress', where: 'user_id = ?', whereArgs: [userId]);
-    final Map<String, dynamic> lessonsMap = {};
-    final Map<String, dynamic> quizzesMap = {};
-
-    for (final row in res) {
-      final String lessonId = row['lesson_id'] as String;
-      final bool completed = (row['completed'] as int) == 1;
-      
-      lessonsMap[lessonId] = {
-        'id': lessonId,
-        'isCompleted': completed,
-        'lastReadTimestamp': row['last_opened'] != null ? DateTime.parse(row['last_opened'] as String).millisecondsSinceEpoch : null,
-      };
-
-      if (row['quiz_score'] != null) {
-        quizzesMap[lessonId] = {
-          'id': lessonId,
-          'isCompleted': completed,
-          'highestScore': row['quiz_score'] as int,
-        };
-      }
-    }
-
-    return {
-      'lessons': lessonsMap,
-      'quizzes': quizzesMap,
-    };
-  }
-
-  @override
-  Future<void> clearProgress(String userId) async {
-    await _db.delete('learning_progress', 'user_id = ?', [userId]);
-  }
-}
-
-// -----------------------------------------------------------------
-// 5. WATCHLIST REPOSITORY
+// WATCHLIST
 // -----------------------------------------------------------------
 class SqliteWatchlistRepository implements WatchlistRepository {
-  final SqliteDbHelper _db = SqliteDbHelper.instance;
+  final SqliteDbHelper _db;
+  final SyncCoordinator _sync;
+
+  SqliteWatchlistRepository({
+    SqliteDbHelper? db,
+    SyncCoordinator? sync,
+  })  : _db = db ?? SqliteDbHelper.instance,
+        _sync = sync ?? SyncCoordinator.instance;
 
   @override
   Future<List<String>> getWatchlist(String userId) async {
-    final res = await _db.query('watchlist', where: 'user_id = ?', whereArgs: [userId], orderBy: 'display_order ASC');
-    return res.map((row) => row['symbol'] as String).toList();
+    final rows = await _db.query(
+      'watchlist',
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      orderBy: 'display_order ASC, created_at ASC',
+    );
+    return rows.map((r) => r['symbol'] as String).toList();
   }
 
   @override
   Future<void> addToWatchlist(String userId, String symbol) async {
-    await _db.insert('watchlist', {
+    // Append to the end rather than colliding everything at order 0.
+    final existing = await _db.rawQuery(
+      'SELECT COALESCE(MAX(display_order), -1) AS max_order '
+      'FROM watchlist WHERE user_id = ?',
+      [userId],
+    );
+    final nextOrder =
+        ((existing.first['max_order'] as num?)?.toInt() ?? -1) + 1;
+
+    final row = {
       'user_id': userId,
       'symbol': symbol,
-      'display_order': 0,
+      'display_order': nextOrder,
       'created_at': DateTime.now().toIso8601String(),
-    });
+    };
+    await _db.insert('watchlist', row);
+    await _sync.enqueue('watchlist', 'INSERT', symbol, row);
   }
 
   @override
   Future<void> removeFromWatchlist(String userId, String symbol) async {
     await _db.delete('watchlist', 'user_id = ? AND symbol = ?', [userId, symbol]);
+    await _sync.enqueue('watchlist', 'DELETE', symbol, null);
   }
 
   @override
   Future<void> clearWatchlist(String userId) async {
+    final symbols = await getWatchlist(userId);
     await _db.delete('watchlist', 'user_id = ?', [userId]);
+    for (final s in symbols) {
+      await _sync.enqueue('watchlist', 'DELETE', s, null);
+    }
+  }
+
+  @override
+  Future<void> reorder(String userId, List<String> symbolsInOrder) async {
+    for (var i = 0; i < symbolsInOrder.length; i++) {
+      await _db.update(
+        'watchlist',
+        {'display_order': i},
+        'user_id = ? AND symbol = ?',
+        [userId, symbolsInOrder[i]],
+      );
+    }
   }
 }
 
 // -----------------------------------------------------------------
-// 6. STATISTICS REPOSITORY
+// DRAWINGS
 // -----------------------------------------------------------------
-class SqliteStatisticsRepository implements StatisticsRepository {
-  final SqliteDbHelper _db = SqliteDbHelper.instance;
+class SqliteDrawingRepository implements DrawingRepository {
+  final SqliteDbHelper _db;
+  final SyncCoordinator _sync;
+  final SessionProvider _session;
+  final Logger _logger;
+
+  SqliteDrawingRepository({
+    required SessionProvider session,
+    required Logger logger,
+    SqliteDbHelper? db,
+    SyncCoordinator? sync,
+  })  : _session = session,
+        _logger = logger,
+        _db = db ?? SqliteDbHelper.instance,
+        _sync = sync ?? SyncCoordinator.instance;
 
   @override
-  Future<Map<String, dynamic>?> getUserStats(String userId) async {
-    final res = await _db.query('user_statistics', where: 'user_id = ?', whereArgs: [userId]);
-    return res.isNotEmpty ? res.first : null;
+  Future<List<Drawing>> getForSymbol(String symbol) async {
+    final rows = await _db.query(
+      'drawings',
+      where: 'user_id = ? AND symbol = ?',
+      whereArgs: [_session.userId, symbol],
+      orderBy: 'created_at ASC',
+    );
+
+    final out = <Drawing>[];
+    for (final r in rows) {
+      try {
+        out.add(_fromRow(r));
+      } catch (e) {
+        // A single corrupt row should not blank the whole chart.
+        _logger.warning('Skipping malformed drawing ${r['drawing_id']}: $e');
+      }
+    }
+    return out;
   }
 
   @override
-  Future<void> saveUserStats(String userId, Map<String, dynamic> stats) async {
-    await _db.insert('user_statistics', {
-      'user_id': userId,
-      'total_trades': stats['total_trades'] ?? 0,
-      'spot_trades': stats['spot_trades'] ?? 0,
-      'futures_trades': stats['futures_trades'] ?? 0,
-      'winning_trades': stats['winning_trades'] ?? 0,
-      'losing_trades': stats['losing_trades'] ?? 0,
-      'average_win': stats['average_win'] ?? 0.0,
-      'average_loss': stats['average_loss'] ?? 0.0,
-      'largest_win': stats['largest_win'] ?? 0.0,
-      'largest_loss': stats['largest_loss'] ?? 0.0,
-      'average_holding_time': stats['average_holding_time'] ?? 0.0,
-      'best_day': stats['best_day'],
-      'worst_day': stats['worst_day'],
+  Future<List<String>> symbolsWithDrawings() async {
+    final rows = await _db.rawQuery(
+      'SELECT DISTINCT symbol FROM drawings WHERE user_id = ? ORDER BY symbol',
+      [_session.userId],
+    );
+    return rows.map((r) => r['symbol'] as String).toList();
+  }
+
+  @override
+  Future<void> save(Drawing drawing) async {
+    final row = _toRow(drawing);
+    await _db.insert('drawings', row);
+    await _sync.enqueue('drawings', 'INSERT', drawing.id, row);
+  }
+
+  @override
+  Future<void> delete(String id, String symbol) async {
+    await _db.delete(
+      'drawings',
+      'drawing_id = ? AND user_id = ?',
+      [id, _session.userId],
+    );
+    await _sync.enqueue('drawings', 'DELETE', id, null);
+  }
+
+  @override
+  Future<void> clearSymbol(String symbol) async {
+    final existing = await getForSymbol(symbol);
+    await _db.delete(
+      'drawings',
+      'user_id = ? AND symbol = ?',
+      [_session.userId, symbol],
+    );
+    for (final d in existing) {
+      await _sync.enqueue('drawings', 'DELETE', d.id, null);
+    }
+  }
+
+  Map<String, dynamic> _toRow(Drawing d) {
+    String? textColumn = d.text;
+    if (d.properties != null && d.properties!.isNotEmpty) {
+      textColumn = jsonEncode({
+        if (d.text != null) 'text': d.text,
+        'properties': d.properties,
+      });
+    }
+    return {
+      'drawing_id': d.id,
+      'user_id': _session.userId,
+      'symbol': d.symbol,
+      'tool': d.tool.name,
+      'anchors': jsonEncode(d.anchors.map((a) => a.toJson()).toList()),
+      'color': d.colorValue,
+      'stroke_width': d.strokeWidth,
+      'text': textColumn,
+      'created_at': d.createdAt,
+    };
+  }
+
+  Drawing _fromRow(Map<String, dynamic> r) {
+    final anchors = (jsonDecode(r['anchors'] as String) as List)
+        .map((e) => DrawingAnchor.fromJson(e as Map<String, dynamic>))
+        .toList();
+
+    String? text = r['text'] as String?;
+    Map<String, dynamic>? properties;
+
+    if (text != null && text.trim().startsWith('{')) {
+      try {
+        final decoded = jsonDecode(text);
+        if (decoded is Map<String, dynamic>) {
+          if (decoded.containsKey('properties')) {
+            properties = Map<String, dynamic>.from(decoded['properties'] as Map);
+            text = decoded['text'] as String?;
+          }
+        }
+      } catch (_) {
+        // Plain text string starting with '{'
+      }
+    }
+
+    return Drawing(
+      id: r['drawing_id'] as String,
+      tool: DrawingTool.fromId(r['tool'] as String),
+      symbol: r['symbol'] as String,
+      anchors: anchors,
+      colorValue: (r['color'] as num).toInt(),
+      strokeWidth: (r['stroke_width'] as num?)?.toDouble() ?? 1.5,
+      text: text,
+      createdAt: (r['created_at'] as num).toInt(),
+      properties: properties,
+    );
+  }
+}
+
+// -----------------------------------------------------------------
+// CHART PREFERENCES
+// -----------------------------------------------------------------
+class SqliteChartPrefsRepository implements ChartPrefsRepository {
+  final SqliteDbHelper _db;
+  final SyncCoordinator _sync;
+  final SessionProvider _session;
+
+  SqliteChartPrefsRepository({
+    required SessionProvider session,
+    SqliteDbHelper? db,
+    SyncCoordinator? sync,
+  })  : _session = session,
+        _db = db ?? SqliteDbHelper.instance,
+        _sync = sync ?? SyncCoordinator.instance;
+
+  @override
+  Future<ChartPrefs?> get(String symbol) async {
+    final rows = await _db.query(
+      'chart_prefs',
+      where: 'user_id = ? AND symbol = ?',
+      whereArgs: [_session.userId, symbol],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    final r = rows.first;
+
+    final rawIndicators = r['indicators'] as String?;
+    return ChartPrefs(
+      symbol: symbol,
+      timeframe: r['timeframe'] as String,
+      chartType: r['chart_type'] as String? ?? 'candles',
+      indicators: rawIndicators == null || rawIndicators.isEmpty
+          ? const []
+          : (jsonDecode(rawIndicators) as List).cast<String>(),
+    );
+  }
+
+  @override
+  Future<void> save(ChartPrefs prefs) async {
+    final row = {
+      'user_id': _session.userId,
+      'symbol': prefs.symbol,
+      'timeframe': prefs.timeframe,
+      'indicators': jsonEncode(prefs.indicators),
+      'chart_type': prefs.chartType,
       'updated_at': DateTime.now().toIso8601String(),
-    });
-  }
-
-  @override
-  Future<Map<String, dynamic>?> getLeaderboardStats(String userId) async {
-    final res = await _db.query('leaderboard_stats', where: 'user_id = ?', whereArgs: [userId]);
-    return res.isNotEmpty ? res.first : null;
-  }
-
-  @override
-  Future<void> saveLeaderboardStats(String userId, String username, double winRate, double returnPct, double netProfit) async {
-    await _db.insert('leaderboard_stats', {
-      'user_id': userId,
-      'username': username,
-      'win_rate': winRate,
-      'return_pct': returnPct,
-      'net_profit': netProfit,
-      'updated_at': DateTime.now().toIso8601String(),
-    });
-  }
-
-  @override
-  Future<Map<String, dynamic>?> getSettings(String userId) async {
-    final res = await _db.query('settings', where: 'user_id = ?', whereArgs: [userId]);
-    return res.isNotEmpty ? res.first : null;
-  }
-
-  @override
-  Future<void> saveSettings(String userId, String theme, String language, int defaultLeverage, String chartType) async {
-    await _db.insert('settings', {
-      'user_id': userId,
-      'theme': theme,
-      'language': language,
-      'default_leverage': defaultLeverage,
-      'chart_type': chartType,
-      'updated_at': DateTime.now().toIso8601String(),
-    });
-  }
-
-  @override
-  Future<Map<String, dynamic>?> getSubscription(String userId) async {
-    final res = await _db.query('subscriptions', where: 'user_id = ?', whereArgs: [userId]);
-    return res.isNotEmpty ? res.first : null;
-  }
-
-  @override
-  Future<void> saveSubscription(String userId, String plan, String status, String? purchaseDate, String? expiryDate, String platform) async {
-    await _db.insert('subscriptions', {
-      'user_id': userId,
-      'plan': plan,
-      'status': status,
-      'purchase_date': purchaseDate,
-      'expiry_date': expiryDate,
-      'platform': platform,
-      'updated_at': DateTime.now().toIso8601String(),
-    });
-  }
-
-  @override
-  Future<void> clearAllStats(String userId) async {
-    await _db.delete('user_statistics', 'user_id = ?', [userId]);
-    await _db.delete('leaderboard_stats', 'user_id = ?', [userId]);
-    await _db.delete('settings', 'user_id = ?', [userId]);
-    await _db.delete('subscriptions', 'user_id = ?', [userId]);
+    };
+    await _db.insert('chart_prefs', row);
+    await _sync.enqueue('chart_prefs', 'INSERT', prefs.symbol, row);
   }
 }

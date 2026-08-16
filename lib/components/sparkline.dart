@@ -50,7 +50,7 @@ class _SparklinePainter extends CustomPainter {
     final double maxVal = data.reduce(math.max);
     final double range = (maxVal - minVal == 0.0) ? 1.0 : (maxVal - minVal);
     
-    final double padY = 4.0;
+    const double padY = 4.0;
     final double drawH = size.height - padY * 2;
     final double stepX = size.width / (data.length - 1);
 

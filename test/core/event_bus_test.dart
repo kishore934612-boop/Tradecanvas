@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:app/core/events/event_bus.dart';
-import 'package:app/core/events/trade_events.dart';
 
 class TestEvent extends AppEvent {
   final String message;
@@ -11,6 +10,30 @@ class TestEvent extends AppEvent {
 class AnotherTestEvent extends AppEvent {
   final int value;
   AnotherTestEvent(this.value);
+}
+
+/// Multi-field event used to assert the bus delivers a payload untouched.
+/// Locally defined so the test does not depend on any app-domain event type.
+class PayloadTestEvent extends AppEvent {
+  final String tradeId;
+  final String symbol;
+  final double pnl;
+  final bool isWin;
+  final int durationMs;
+  final String closeReason;
+  final double riskReward;
+  final double riskPct;
+
+  PayloadTestEvent({
+    required this.tradeId,
+    required this.symbol,
+    required this.pnl,
+    required this.isWin,
+    required this.durationMs,
+    required this.closeReason,
+    required this.riskReward,
+    required this.riskPct,
+  });
 }
 
 void main() {
@@ -95,14 +118,14 @@ void main() {
       expect(receiveCount, equals(1)); // Should not increase
     });
 
-    test('TradeCompletedEvent carries correct data', () async {
-      final completer = Completer<TradeCompletedEvent>();
+    test('event with a multi-field payload carries correct data', () async {
+      final completer = Completer<PayloadTestEvent>();
       
-      final sub = bus.subscribe<TradeCompletedEvent>((event) {
+      final sub = bus.subscribe<PayloadTestEvent>((event) {
         completer.complete(event);
       });
       
-      bus.publish(TradeCompletedEvent(
+      bus.publish(PayloadTestEvent(
         tradeId: 't-123',
         symbol: 'BTC',
         pnl: 150.0,

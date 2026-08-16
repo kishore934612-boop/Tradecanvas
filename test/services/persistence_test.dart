@@ -6,7 +6,7 @@ library;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:app/services/persistence/persistence_service.dart';
-import 'package:app/services/persistence/in_memory_persistence.dart';
+import '../helpers/in_memory_persistence.dart';
 
 void main() {
   late InMemoryPersistence store;
