@@ -285,6 +285,33 @@ class MarketDataProvider extends ChangeNotifier {
     unawaited(_loadSparklines(_watchlist));
   }
 
+  /// Replace the entire watchlist with [newWatchlist] (e.g. from onboarding/settings).
+  Future<void> replaceWatchlist(List<String> newWatchlist) async {
+    final upperList = newWatchlist
+        .map((s) => s.toUpperCase().trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+    if (upperList.isEmpty) return;
+
+    _watchlist
+      ..clear()
+      ..addAll(upperList);
+    _interest
+      ..clear()
+      ..addAll(upperList);
+    notifyListeners();
+    unawaited(_loadSparklines(upperList));
+
+    try {
+      await _watchlistRepo.clearWatchlist(_session.userId);
+      for (final symbol in upperList) {
+        await _watchlistRepo.addToWatchlist(_session.userId, symbol);
+      }
+    } catch (e) {
+      _logger.warning('Watchlist replace failed: $e');
+    }
+  }
+
   @override
   void dispose() {
     _tickerSub?.cancel();

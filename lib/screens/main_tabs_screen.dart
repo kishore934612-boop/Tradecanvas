@@ -174,9 +174,9 @@ class _MainTabsScreenState extends State<MainTabsScreen> {
                     label: 'Chart',
                   ),
                   BottomNavigationBarItem(
-                    icon: Icon(Icons.settings_outlined, size: 22),
-                    activeIcon: Icon(Icons.settings_rounded, size: 22),
-                    label: 'Settings',
+                    icon: Icon(Icons.person_outline_rounded, size: 22),
+                    activeIcon: Icon(Icons.person_rounded, size: 22),
+                    label: 'Profile',
                   ),
                 ],
               ),

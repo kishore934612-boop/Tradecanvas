@@ -277,6 +277,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           Haptics.selection();
                           chart.toggleIndicator(type);
                         },
+                        indicatorStyles: chart.indicatorStyles,
+                        onIndicatorStyleChanged: (type, style) {
+                          Haptics.selection();
+                          chart.setIndicatorStyle(type, style);
+                        },
                       ),
                     ),
                     onTimeframe: (tf) {
@@ -613,6 +618,7 @@ class _ChartPanel extends StatelessWidget {
             style: style,
             onToggleStyle: onToggleStyle,
             onIndicators: onIndicators,
+            hasActiveIndicators: chart.enabledIndicators.isNotEmpty,
             fullscreen: false,
             onToggleFullscreen: onOpenFullChart,
           ),

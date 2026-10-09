@@ -6,14 +6,19 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'package:app/components/chart/chart_painter.dart' show ChartStyle;
+import 'package:app/components/chart/chart_quick_dropdown_menu.dart';
 import 'package:app/components/chart/chart_toolbar.dart';
 import 'package:app/components/chart/chart_view.dart';
 import 'package:app/components/chart/indicator_sheet.dart';
+import 'package:app/analysis_tools/models/analysis_type.dart';
+import 'package:app/components/chart/smc_sheet.dart';
+import 'package:app/components/chart/strategy_sheet.dart';
 import 'package:app/components/ui.dart';
 import 'package:app/constants/colors.dart';
 import 'package:app/core/di/service_locator.dart';
@@ -24,27 +29,39 @@ import 'package:app/domain/repositories/drawing_repository.dart';
 import 'package:app/engine/chart_controller.dart';
 import 'package:app/engine/drawing_controller.dart';
 import 'package:app/engine/magnetic_snap.dart';
+import 'package:app/engine/smc_engine.dart';
+import 'package:app/engine/smc_filter.dart';
+import 'package:app/engine/strategy_engine.dart';
 import 'package:app/models/drawing.dart';
 import 'package:app/models/instrument.dart';
+import 'package:app/models/smc_type.dart';
+import 'package:app/models/strategy_type.dart';
 import 'package:app/models/user_profile.dart';
 import 'package:app/providers/app_state.dart';
 import 'package:app/providers/market_data_provider.dart';
 import 'package:app/screens/replay_screen.dart';
 import 'package:app/screens/symbol_search_screen.dart';
+import 'package:app/services/persistence/persistence_service.dart';
 import 'package:app/services/symbol_registry.dart';
 import 'package:app/utils/haptics.dart';
 
 class ChartScreen extends StatefulWidget {
   final Instrument instrument;
+  final String? initialTimeframe;
   final bool showBackButton;
   final ValueChanged<bool>? onFullscreenChanged;
 
-  const ChartScreen({
+  ChartScreen({
     super.key,
-    required this.instrument,
+    Instrument? instrument,
+    String? symbol,
+    this.initialTimeframe,
     this.showBackButton = true,
     this.onFullscreenChanged,
-  });
+  }) : instrument = instrument ??
+            (symbol != null
+                ? Instrument.placeholder(symbol)
+                : Instrument.placeholder('BTCUSDT'));
 
   @override
   State<ChartScreen> createState() => _ChartScreenState();
@@ -57,11 +74,20 @@ class _ChartScreenState extends State<ChartScreen> {
   late DrawingController _drawings;
   late Instrument _instrument;
 
+  Set<StrategyType> _enabledStrategies = {};
+  StrategySettings _strategySettings = const StrategySettings();
+  List<StrategySignal> _strategySignals = [];
+
+  Set<SmcType> _enabledSmc = {};
+  SmcSettings _smcSettings = const SmcSettings();
+  List<SmcStructure> _smcStructures = [];
+
   final GlobalKey<ChartViewRefState> _chartViewKey =
       GlobalKey<ChartViewRefState>();
 
   ChartStyle _style = ChartStyle.candles;
   bool _fullscreen = false;
+  bool _isScrolledAway = false;
 
   @override
   void initState() {
@@ -85,13 +111,21 @@ class _ChartScreenState extends State<ChartScreen> {
       symbol: _instrument.symbol,
     );
 
+    _chart.addListener(_onChartDataChanged);
+
     _chart.load();
+    if (widget.initialTimeframe != null && widget.initialTimeframe!.isNotEmpty) {
+      _chart.setTimeframe(Timeframe.fromApiValue(widget.initialTimeframe!));
+    }
     _drawings.load();
     _loadSavedPreferences();
+    _loadSavedStrategies();
+    _loadSavedSmc();
   }
 
   @override
   void dispose() {
+    _chart.removeListener(_onChartDataChanged);
     _chart.dispose();
     _drawings.dispose();
     super.dispose();
@@ -139,17 +173,227 @@ class _ChartScreenState extends State<ChartScreen> {
 
   void _openIndicators() {
     Haptics.selection();
-    showModalBottomSheet<void>(
+    showDialog<void>(
       context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (_) => IndicatorSheet(
-        enabled: _chart.enabledIndicators,
-        onToggle: (type) {
-          setState(() {
-            _chart.toggleIndicator(type);
-          });
-        },
+      builder: (_) => Dialog(
+        backgroundColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460, maxHeight: 620),
+          child: IndicatorSheet(
+            enabledIndicators: _chart.enabledIndicators,
+            onToggleIndicator: (type) {
+              setState(() {
+                _chart.toggleIndicator(type);
+              });
+            },
+            enabledStrategies: _enabledStrategies,
+            onToggleStrategy: _toggleStrategy,
+            strategySettings: _strategySettings,
+            onStrategySettingsChanged: _updateStrategySettings,
+            enabledSmc: _enabledSmc,
+            onToggleSmc: _toggleSmc,
+            smcSettings: _smcSettings,
+            onSmcSettingsChanged: _updateSmcSettings,
+            indicatorStyles: _chart.indicatorStyles,
+            onIndicatorStyleChanged: (type, style) {
+              setState(() {
+                _chart.setIndicatorStyle(type, style);
+              });
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+
+
+
+
+  void _onChartDataChanged() {
+    _recomputeStrategies();
+    _recomputeSmc();
+  }
+
+  Future<void> _loadSavedStrategies() async {
+    try {
+      if (!serviceLocator.isRegistered<PersistenceService>()) return;
+      final p = serviceLocator<PersistenceService>();
+      final list = await p.readStringList('enabled_strategies');
+      if (list != null) {
+        _enabledStrategies = list.map(StrategyType.fromId).toSet();
+      }
+      final jsonStr = await p.readString('strategy_settings');
+      if (jsonStr != null) {
+        _strategySettings = StrategySettings.fromJson(
+            jsonDecode(jsonStr) as Map<String, dynamic>);
+      }
+      _recomputeStrategies();
+    } catch (e) {
+      Logger.instance.error('Failed to load strategy preferences: $e');
+    }
+  }
+
+  Future<void> _loadSavedSmc() async {
+    try {
+      if (!serviceLocator.isRegistered<PersistenceService>()) return;
+      final p = serviceLocator<PersistenceService>();
+      final list = await p.readStringList('enabled_smc');
+      if (list != null) {
+        _enabledSmc = list.map(SmcType.fromId).toSet();
+      }
+      final jsonStr = await p.readString('smc_settings');
+      if (jsonStr != null) {
+        _smcSettings =
+            SmcSettings.fromJson(jsonDecode(jsonStr) as Map<String, dynamic>);
+      }
+      _recomputeSmc();
+    } catch (e) {
+      Logger.instance.error('Failed to load SMC preferences: $e');
+    }
+  }
+
+  void _recomputeStrategies() {
+    if (_enabledStrategies.isEmpty) {
+      if (_strategySignals.isNotEmpty) {
+        setState(() {
+          _strategySignals = [];
+        });
+      }
+      return;
+    }
+    final signals = StrategyEngine.evaluate(
+      candles: _chart.candles,
+      activeStrategies: _enabledStrategies,
+      settings: _strategySettings,
+      indicators: _chart.indicators,
+    );
+    if (mounted) {
+      setState(() {
+        _strategySignals = signals;
+      });
+    }
+  }
+
+  void _recomputeSmc() {
+    if (_enabledSmc.isEmpty) {
+      if (_smcStructures.isNotEmpty) {
+        setState(() {
+          _smcStructures = [];
+        });
+      }
+      return;
+    }
+    final rawStructures = SmcEngine.evaluate(
+      candles: _chart.candles,
+      activeOverlays: _enabledSmc,
+      settings: _smcSettings,
+    );
+    final filtered = SmcFilter.filterAndMerge(
+      structures: rawStructures,
+      candles: _chart.candles,
+      settings: _smcSettings,
+    );
+    if (mounted) {
+      setState(() {
+        _smcStructures = filtered;
+      });
+    }
+  }
+
+  void _toggleStrategy(StrategyType type) {
+    setState(() {
+      if (_enabledStrategies.contains(type)) {
+        _enabledStrategies.remove(type);
+      } else {
+        _enabledStrategies.add(type);
+      }
+    });
+    _recomputeStrategies();
+    if (serviceLocator.isRegistered<PersistenceService>()) {
+      final p = serviceLocator<PersistenceService>();
+      p.writeStringList(
+          'enabled_strategies', _enabledStrategies.map((s) => s.name).toList());
+    }
+  }
+
+  void _toggleSmc(SmcType type) {
+    setState(() {
+      if (_enabledSmc.contains(type)) {
+        _enabledSmc.remove(type);
+      } else {
+        _enabledSmc.add(type);
+      }
+    });
+    _recomputeSmc();
+    if (serviceLocator.isRegistered<PersistenceService>()) {
+      final p = serviceLocator<PersistenceService>();
+      p.writeStringList('enabled_smc', _enabledSmc.map((s) => s.name).toList());
+    }
+  }
+
+  void _updateStrategySettings(StrategySettings settings) {
+    setState(() {
+      _strategySettings = settings;
+    });
+    _recomputeStrategies();
+    if (serviceLocator.isRegistered<PersistenceService>()) {
+      final p = serviceLocator<PersistenceService>();
+      p.writeString('strategy_settings', jsonEncode(settings.toJson()));
+    }
+  }
+
+  void _updateSmcSettings(SmcSettings settings) {
+    setState(() {
+      _smcSettings = settings;
+    });
+    _recomputeSmc();
+    if (serviceLocator.isRegistered<PersistenceService>()) {
+      final p = serviceLocator<PersistenceService>();
+      p.writeString('smc_settings', jsonEncode(settings.toJson()));
+    }
+  }
+
+  void _openStrategies() {
+    Haptics.selection();
+    showDialog<void>(
+      context: context,
+      builder: (_) => Dialog(
+        backgroundColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460, maxHeight: 620),
+          child: StrategySheet(
+            enabled: _enabledStrategies,
+            onToggle: _toggleStrategy,
+            settings: _strategySettings,
+            onSettingsChanged: _updateStrategySettings,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openSmc() {
+    Haptics.selection();
+    showDialog<void>(
+      context: context,
+      builder: (_) => Dialog(
+        backgroundColor: Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460, maxHeight: 620),
+          child: SmcSheet(
+            enabled: _enabledSmc,
+            onToggle: _toggleSmc,
+            settings: _smcSettings,
+            onSettingsChanged: _updateSmcSettings,
+          ),
+        ),
       ),
     );
   }
@@ -168,6 +412,7 @@ class _ChartScreenState extends State<ChartScreen> {
     }
   }
 
+  // ignore: unused_element
   void _showDrawingToolsTray() {
     Haptics.selection();
     showModalBottomSheet<void>(
@@ -180,240 +425,275 @@ class _ChartScreenState extends State<ChartScreen> {
         final appState = context.read<AppState>();
         final profile = appState.profile;
 
-        final toolsList = [
+        final categories = [
           (
-            name: 'Trend Line',
-            icon: Icons.show_chart_rounded,
-            action: () => _drawings.setActiveTool(DrawingTool.trendline),
-            active: _drawings.activeTool == DrawingTool.trendline,
+            name: 'Smart Analysis (SMC)',
+            tools: [
+              (name: 'Bullish Order Block', icon: Icons.view_headline_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.bullishOrderBlock), active: _drawings.activeAnalysisTool == AnalysisType.bullishOrderBlock, isDestructive: false),
+              (name: 'Bearish Order Block', icon: Icons.table_rows_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.bearishOrderBlock), active: _drawings.activeAnalysisTool == AnalysisType.bearishOrderBlock, isDestructive: false),
+              (name: 'Bullish FVG', icon: Icons.unfold_more_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.bullishFvg), active: _drawings.activeAnalysisTool == AnalysisType.bullishFvg, isDestructive: false),
+              (name: 'Bearish FVG', icon: Icons.unfold_less_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.bearishFvg), active: _drawings.activeAnalysisTool == AnalysisType.bearishFvg, isDestructive: false),
+              (name: 'Break of Struct', icon: Icons.call_made_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.bos), active: _drawings.activeAnalysisTool == AnalysisType.bos, isDestructive: false),
+              (name: 'Change of Char', icon: Icons.change_circle_outlined, action: () => _drawings.setActiveAnalysisTool(AnalysisType.choch), active: _drawings.activeAnalysisTool == AnalysisType.choch, isDestructive: false),
+            ],
           ),
           (
-            name: 'Arrow',
-            icon: Icons.north_east_rounded,
-            action: () => _drawings.setActiveTool(DrawingTool.arrow),
-            active: _drawings.activeTool == DrawingTool.arrow,
+            name: 'Liquidity',
+            tools: [
+              (name: 'Buy-side Liquidity', icon: Icons.water_drop_outlined, action: () => _drawings.setActiveAnalysisTool(AnalysisType.bsl), active: _drawings.activeAnalysisTool == AnalysisType.bsl, isDestructive: false),
+              (name: 'Sell-side Liquidity', icon: Icons.opacity_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.ssl), active: _drawings.activeAnalysisTool == AnalysisType.ssl, isDestructive: false),
+              (name: 'Equilibrium (EQ)', icon: Icons.drag_handle_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.equilibrium), active: _drawings.activeAnalysisTool == AnalysisType.equilibrium, isDestructive: false),
+            ],
           ),
           (
-            name: 'Horizontal',
-            icon: Icons.horizontal_rule_rounded,
-            action: () => _drawings.setActiveTool(DrawingTool.horizontalLine),
-            active: _drawings.activeTool == DrawingTool.horizontalLine,
+            name: 'Supply & Demand',
+            tools: [
+              (name: 'Supply Zone', icon: Icons.arrow_circle_up_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.supplyZone), active: _drawings.activeAnalysisTool == AnalysisType.supplyZone, isDestructive: false),
+              (name: 'Demand Zone', icon: Icons.arrow_circle_down_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.demandZone), active: _drawings.activeAnalysisTool == AnalysisType.demandZone, isDestructive: false),
+              (name: 'Premium Zone', icon: Icons.vertical_align_top_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.premiumZone), active: _drawings.activeAnalysisTool == AnalysisType.premiumZone, isDestructive: false),
+              (name: 'Discount Zone', icon: Icons.vertical_align_bottom_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.discountZone), active: _drawings.activeAnalysisTool == AnalysisType.discountZone, isDestructive: false),
+              (name: 'Support Level', icon: Icons.call_received_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.supportZone), active: _drawings.activeAnalysisTool == AnalysisType.supportZone, isDestructive: false),
+              (name: 'Resistance Level', icon: Icons.call_made_rounded, action: () => _drawings.setActiveAnalysisTool(AnalysisType.resistanceZone), active: _drawings.activeAnalysisTool == AnalysisType.resistanceZone, isDestructive: false),
+            ],
           ),
           (
-            name: 'Vertical Line',
-            icon: Icons.more_vert_rounded,
-            action: () => _drawings.setActiveTool(DrawingTool.verticalLine),
-            active: _drawings.activeTool == DrawingTool.verticalLine,
+            name: 'Lines & Rays',
+            tools: [
+              (name: 'Trend Line', icon: Icons.show_chart_rounded, action: () => _drawings.setActiveTool(DrawingTool.trendline), active: _drawings.activeTool == DrawingTool.trendline, isDestructive: false),
+              (name: 'Arrow', icon: Icons.north_east_rounded, action: () => _drawings.setActiveTool(DrawingTool.arrow), active: _drawings.activeTool == DrawingTool.arrow, isDestructive: false),
+              (name: 'Horizontal Line', icon: Icons.horizontal_rule_rounded, action: () => _drawings.setActiveTool(DrawingTool.horizontalLine), active: _drawings.activeTool == DrawingTool.horizontalLine, isDestructive: false),
+              (name: 'Vertical Line', icon: Icons.more_vert_rounded, action: () => _drawings.setActiveTool(DrawingTool.verticalLine), active: _drawings.activeTool == DrawingTool.verticalLine, isDestructive: false),
+            ],
           ),
           (
-            name: 'Rectangle Box',
-            icon: Icons.rectangle_outlined,
-            action: () => _drawings.setActiveTool(DrawingTool.rectangle),
-            active: _drawings.activeTool == DrawingTool.rectangle,
+            name: 'Shapes & Freehand',
+            tools: [
+              (name: 'Rectangle Box', icon: Icons.rectangle_outlined, action: () => _drawings.setActiveTool(DrawingTool.rectangle), active: _drawings.activeTool == DrawingTool.rectangle, isDestructive: false),
+              (name: 'Triangle', icon: Icons.change_history_rounded, action: () => _drawings.setActiveTool(DrawingTool.triangle), active: _drawings.activeTool == DrawingTool.triangle, isDestructive: false),
+            ],
           ),
           (
-            name: 'Triangle',
-            icon: Icons.change_history_rounded,
-            action: () => _drawings.setActiveTool(DrawingTool.triangle),
-            active: _drawings.activeTool == DrawingTool.triangle,
+            name: 'Fibonacci & Math',
+            tools: [
+              (name: 'Fibonacci', icon: Icons.compress_rounded, action: () => _drawings.setActiveTool(DrawingTool.fibRetracement), active: _drawings.activeTool == DrawingTool.fibRetracement, isDestructive: false),
+              (name: 'Fib Extension', icon: Icons.timeline_rounded, action: () => _drawings.setActiveTool(DrawingTool.fibExtension), active: _drawings.activeTool == DrawingTool.fibExtension, isDestructive: false),
+            ],
           ),
           (
-            name: 'Fibonacci',
-            icon: Icons.compress_rounded,
-            action: () => _drawings.setActiveTool(DrawingTool.fibRetracement),
-            active: _drawings.activeTool == DrawingTool.fibRetracement,
+            name: 'Annotations & Measurement',
+            tools: [
+              (name: 'Text Label', icon: Icons.text_fields_rounded, action: () => _drawings.setActiveTool(DrawingTool.text), active: _drawings.activeTool == DrawingTool.text, isDestructive: false),
+              (name: 'Callout Box', icon: Icons.mark_chat_read_rounded, action: () => _drawings.setActiveTool(DrawingTool.callout), active: _drawings.activeTool == DrawingTool.callout, isDestructive: false),
+              (name: 'Measurement', icon: Icons.straighten_rounded, action: () => _drawings.setActiveTool(DrawingTool.measurement), active: _drawings.activeTool == DrawingTool.measurement, isDestructive: false),
+            ],
           ),
           (
-            name: 'Fib Extension',
-            icon: Icons.timeline_rounded,
-            action: () => _drawings.setActiveTool(DrawingTool.fibExtension),
-            active: _drawings.activeTool == DrawingTool.fibExtension,
+            name: 'Positions & Risk',
+            tools: [
+              (name: 'Long Position', icon: Icons.trending_up_rounded, action: () => _drawings.setActiveTool(DrawingTool.longPosition), active: _drawings.activeTool == DrawingTool.longPosition, isDestructive: false),
+              (name: 'Short Position', icon: Icons.trending_down_rounded, action: () => _drawings.setActiveTool(DrawingTool.shortPosition), active: _drawings.activeTool == DrawingTool.shortPosition, isDestructive: false),
+            ],
           ),
           (
-            name: 'Freehand Brush',
-            icon: Icons.brush_rounded,
-            action: () => _drawings.setActiveTool(DrawingTool.brush),
-            active: _drawings.activeTool == DrawingTool.brush,
-          ),
-          (
-            name: 'Callout Box',
-            icon: Icons.mark_chat_read_rounded,
-            action: () => _drawings.setActiveTool(DrawingTool.callout),
-            active: _drawings.activeTool == DrawingTool.callout,
-          ),
-          (
-            name: 'Text Label',
-            icon: Icons.text_fields_rounded,
-            action: () => _drawings.setActiveTool(DrawingTool.text),
-            active: _drawings.activeTool == DrawingTool.text,
-          ),
-          (
-            name: 'Measurement',
-            icon: Icons.straighten_rounded,
-            action: () => _drawings.setActiveTool(DrawingTool.measurement),
-            active: _drawings.activeTool == DrawingTool.measurement,
-          ),
-          (
-            name: 'Crosshair: ${profile.crosshairMode.label}',
-            icon: Icons.center_focus_strong_rounded,
-            action: () => appState.setCrosshairMode(profile.crosshairMode.next),
-            active: profile.crosshairMode != CrosshairMode.free,
-          ),
-          (
-            name: profile.crosshairShowLabels ? 'Labels: On' : 'Labels: Off',
-            icon: Icons.subtitles_rounded,
-            action: () => appState.setCrosshairShowLabels(!profile.crosshairShowLabels),
-            active: profile.crosshairShowLabels,
-          ),
-          (
-            name: 'Price Marker',
-            icon: Icons.add_chart_rounded,
-            action: () => _promptAddPriceLine(context),
-            active: profile.customPriceLines.isNotEmpty,
-          ),
-          (
-            name: profile.autoScale ? 'Auto Scale: On' : 'Auto Scale: Off',
-            icon: Icons.aspect_ratio_rounded,
-            action: () => appState.setAutoScale(!profile.autoScale),
-            active: profile.autoScale,
-          ),
-          (
-            name: profile.chartLocked ? 'Chart Locked' : 'Lock Chart',
-            icon: profile.chartLocked ? Icons.lock_rounded : Icons.lock_open_rounded,
-            action: () => appState.setChartLocked(!profile.chartLocked),
-            active: profile.chartLocked,
-          ),
-          (
-            name: 'Magnet Snap',
-            icon: Icons.auto_awesome_rounded,
-            action: () => _drawings.cycleMagneticMode(),
-            active: _drawings.magneticMode != MagneticMode.off,
-          ),
-          (
-            name: 'Clear All',
-            icon: Icons.delete_outline_rounded,
-            action: () => _drawings.clearSymbol(),
-            active: false,
+            name: 'Chart Utilities',
+            tools: [
+              (name: 'Crosshair: ${profile.crosshairMode.label}', icon: Icons.center_focus_strong_rounded, action: () => appState.setCrosshairMode(profile.crosshairMode.next), active: profile.crosshairMode != CrosshairMode.free, isDestructive: false),
+              (name: profile.crosshairShowLabels ? 'Labels: On' : 'Labels: Off', icon: Icons.subtitles_rounded, action: () => appState.setCrosshairShowLabels(!profile.crosshairShowLabels), active: profile.crosshairShowLabels, isDestructive: false),
+              (name: 'Price Marker', icon: Icons.add_chart_rounded, action: () => _promptAddPriceLine(context), active: profile.customPriceLines.isNotEmpty, isDestructive: false),
+              (name: profile.autoScale ? 'Auto Scale: On' : 'Auto Scale: Off', icon: Icons.aspect_ratio_rounded, action: () => appState.setAutoScale(!profile.autoScale), active: profile.autoScale, isDestructive: false),
+              (name: profile.chartLocked ? 'Chart Locked' : 'Lock Chart', icon: profile.chartLocked ? Icons.lock_rounded : Icons.lock_open_rounded, action: () => appState.setChartLocked(!profile.chartLocked), active: profile.chartLocked, isDestructive: false),
+              (name: 'Magnet Snap', icon: Icons.auto_awesome_rounded, action: () => _drawings.cycleMagneticMode(), active: _drawings.magneticMode != MagneticMode.off, isDestructive: false),
+              (name: 'Clear All', icon: Icons.delete_outline_rounded, action: () => _drawings.clearSymbol(), active: false, isDestructive: true),
+            ],
           ),
         ];
 
-        return Container(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.65,
-          ),
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-          decoration: BoxDecoration(
-            color: colors.card,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        int selectedCategoryIndex = 0;
+
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            final activeCategories = selectedCategoryIndex == -1
+                ? categories
+                : [categories[selectedCategoryIndex]];
+
+            return Container(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.75,
+              ),
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+              decoration: BoxDecoration(
+                color: colors.card,
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    'Drawing Tools',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: colors.foreground,
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Drawing & Analysis Tools',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: colors.foreground,
+                        ),
+                      ),
+                      IconButton(
+                        icon: Icon(
+                          Icons.close_rounded,
+                          color: colors.mutedForeground,
+                          size: 20,
+                        ),
+                        onPressed: () => Navigator.pop(ctx),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+
+                  // Horizontal Category Switcher Chips Bar
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    physics: const BouncingScrollPhysics(),
+                    child: Row(
+                      children: [
+                        _CategoryChip(
+                          label: 'All',
+                          isSelected: selectedCategoryIndex == -1,
+                          onTap: () {
+                            Haptics.selection();
+                            setSheetState(() => selectedCategoryIndex = -1);
+                          },
+                          colors: colors,
+                        ),
+                        const SizedBox(width: 6),
+                        for (int i = 0; i < categories.length; i++) ...[
+                          _CategoryChip(
+                            label: categories[i].name,
+                            isSelected: selectedCategoryIndex == i,
+                            onTap: () {
+                              Haptics.selection();
+                              setSheetState(() => selectedCategoryIndex = i);
+                            },
+                            colors: colors,
+                          ),
+                          if (i < categories.length - 1) const SizedBox(width: 6),
+                        ],
+                      ],
                     ),
                   ),
-                  IconButton(
-                    icon: Icon(
-                      Icons.close_rounded,
-                      color: colors.mutedForeground,
-                      size: 20,
+                  const SizedBox(height: 12),
+
+                  Expanded(
+                    child: ListView.builder(
+                      physics: const BouncingScrollPhysics(),
+                      itemCount: activeCategories.length,
+                      itemBuilder: (context, catIdx) {
+                        final cat = activeCategories[catIdx];
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (selectedCategoryIndex == -1)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 10, bottom: 6),
+                                child: Text(
+                                  cat.name.toUpperCase(),
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 0.8,
+                                    color: colors.primary,
+                                  ),
+                                ),
+                              ),
+                            GridView.builder(
+                              shrinkWrap: true,
+                              physics: const NeverScrollableScrollPhysics(),
+                              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: 3,
+                                crossAxisSpacing: 8,
+                                mainAxisSpacing: 8,
+                                childAspectRatio: 1.25,
+                              ),
+                              itemCount: cat.tools.length,
+                              itemBuilder: (context, toolIdx) {
+                                final tool = cat.tools[toolIdx];
+                                final isDestructive = tool.isDestructive;
+                                final active = tool.active;
+
+                                return InkWell(
+                                  onTap: () {
+                                    Haptics.selection();
+                                    tool.action();
+                                    Navigator.pop(ctx);
+                                  },
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: AnimatedContainer(
+                                    duration: const Duration(milliseconds: 150),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                      vertical: 8,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: active
+                                          ? colors.primary.withValues(alpha: 0.18)
+                                          : colors.card.withValues(alpha: 0.8),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                        color: isDestructive
+                                            ? colors.destructive.withValues(alpha: 0.5)
+                                            : (active
+                                                  ? colors.primary
+                                                  : colors.border.withValues(alpha: 0.3)),
+                                        width: active ? 1.5 : 1.0,
+                                      ),
+                                    ),
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Icon(
+                                          tool.icon,
+                                          size: 22,
+                                          color: isDestructive
+                                              ? colors.destructive
+                                              : (active
+                                                    ? colors.primary
+                                                    : colors.foreground),
+                                        ),
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          tool.name,
+                                          textAlign: TextAlign.center,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: active
+                                                ? FontWeight.bold
+                                                : FontWeight.w500,
+                                            color: isDestructive
+                                                ? colors.destructive
+                                                : (active
+                                                      ? colors.primary
+                                                      : colors.foreground),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
+                        );
+                      },
                     ),
-                    onPressed: () => Navigator.pop(ctx),
                   ),
                 ],
               ),
-              const SizedBox(height: 10),
-              Expanded(
-                child: GridView.builder(
-                  shrinkWrap: true,
-                  physics: const BouncingScrollPhysics(),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 3,
-                    crossAxisSpacing: 10,
-                    mainAxisSpacing: 10,
-                    childAspectRatio: 1.2,
-                  ),
-                  itemCount: toolsList.length,
-                  itemBuilder: (context, index) {
-                    final tool = toolsList[index];
-                    final isDestructive = tool.name == 'Clear All';
-                    final active = tool.active;
-
-                    return InkWell(
-                      onTap: () {
-                        Haptics.selection();
-                        tool.action();
-                        Navigator.pop(ctx);
-                      },
-                      borderRadius: BorderRadius.circular(12),
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 10,
-                        ),
-                        decoration: BoxDecoration(
-                          color: active
-                              ? colors.primary.withValues(alpha: 0.18)
-                              : colors.card.withValues(alpha: 0.8),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: isDestructive
-                                ? colors.destructive.withValues(alpha: 0.5)
-                                : (active
-                                      ? colors.primary
-                                      : colors.border.withValues(alpha: 0.3)),
-                            width: active ? 1.5 : 1.0,
-                          ),
-                        ),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              tool.icon,
-                              size: 24,
-                              color: isDestructive
-                                  ? colors.destructive
-                                  : (active
-                                        ? colors.primary
-                                        : colors.foreground),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              tool.name,
-                              textAlign: TextAlign.center,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                fontSize: 11.5,
-                                fontWeight: active
-                                    ? FontWeight.bold
-                                    : FontWeight.w500,
-                                color: isDestructive
-                                    ? colors.destructive
-                                    : (active
-                                          ? colors.primary
-                                          : colors.foreground),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
+            );
+          },
         );
       },
     );
@@ -625,6 +905,11 @@ class _ChartScreenState extends State<ChartScreen> {
                   style: _style,
                   onToggleStyle: _toggleStyle,
                   onIndicators: _openIndicators,
+                  hasActiveIndicators: _chart.enabledIndicators.isNotEmpty,
+                  onStrategies: _openStrategies,
+                  hasActiveStrategies: _enabledStrategies.isNotEmpty,
+                  onSmc: _openSmc,
+                  hasActiveSmc: _enabledSmc.isNotEmpty,
                   fullscreen: _fullscreen,
                   onToggleFullscreen: _toggleFullscreen,
                 ),
@@ -646,38 +931,47 @@ class _ChartScreenState extends State<ChartScreen> {
                           controller: _chart,
                           drawings: _drawings,
                           style: _style,
+                          strategySignals: _strategySignals,
+                          strategySettings: _strategySettings,
+                          smcStructures: _smcStructures,
+                          smcSettings: _smcSettings,
+                          onScrolledAwayChanged: (scrolled) {
+                            if (_isScrolledAway != scrolled) {
+                              setState(() => _isScrolledAway = scrolled);
+                            }
+                          },
                         ),
                       ),
                     ),
 
-                    // Reset View Button (Req 2)
-                    Positioned(
-                      right: 12,
-                      bottom: 74,
-                      child: FloatingActionButton.small(
-                        heroTag: 'reset_view_btn',
-                        onPressed: () {
-                          Haptics.selection();
-                          _chartViewKey.currentState?.resetView();
-                        },
-                        backgroundColor: colors.card,
-                        foregroundColor: colors.foreground,
-                        child: const Icon(Icons.restart_alt_rounded, size: 20),
+                    // 1. Live Price Reset Button (Only visible when user has scrolled away from live price)
+                    if (_isScrolledAway)
+                      Positioned(
+                        right: 12,
+                        bottom: 64,
+                        child: FloatingActionButton.small(
+                          heroTag: 'reset_view_btn',
+                          onPressed: () {
+                            Haptics.selection();
+                            _chartViewKey.currentState?.resetView();
+                          },
+                          backgroundColor: colors.primary,
+                          foregroundColor: colors.primaryForeground,
+                          tooltip: 'Jump to Live Price',
+                          child: const Icon(Icons.arrow_forward_rounded, size: 20),
+                        ),
                       ),
-                    ),
 
-                    // Draw Button opening Drawing Tools Tray (Req 1: Icon only)
+                    // Animated Dropdown Menu Button on Right Side Bottom
                     Positioned(
                       right: 12,
                       bottom: 16,
-                      child: FloatingActionButton.small(
-                        heroTag: 'draw_tools_btn',
-                        onPressed: _showDrawingToolsTray,
-                        backgroundColor: colors.primary,
-                        foregroundColor: colors.primaryForeground,
-                        child: const Icon(Icons.edit_rounded, size: 20),
+                      child: ChartQuickDropdownMenu(
+                        onOpenTools: _showDrawingToolsTray,
                       ),
                     ),
+
+
 
                     if (context.watch<AppState>().profile.chartLocked)
                       Positioned(
@@ -885,3 +1179,49 @@ class _Header extends StatelessWidget {
     );
   }
 }
+
+class _CategoryChip extends StatelessWidget {
+  final String label;
+  final bool isSelected;
+  final VoidCallback onTap;
+  final ThemePalette colors;
+
+  const _CategoryChip({
+    required this.label,
+    required this.isSelected,
+    required this.onTap,
+    required this.colors,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? colors.primary
+              : colors.card.withValues(alpha: 0.8),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isSelected
+                ? colors.primary
+                : colors.border.withValues(alpha: 0.6),
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+            color: isSelected ? colors.primaryForeground : colors.foreground,
+          ),
+        ),
+      ),
+    );
+  }
+}
+

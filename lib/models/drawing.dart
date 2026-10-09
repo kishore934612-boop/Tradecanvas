@@ -21,9 +21,10 @@ enum DrawingTool {
   triangle,
   parallelChannel,
   fibExtension,
-  brush,
   callout,
-  htfOverlay;
+  htfOverlay,
+  longPosition,
+  shortPosition;
 
   /// Number of anchors the user must place to complete the shape.
   int get anchorCount {
@@ -31,7 +32,6 @@ enum DrawingTool {
       case DrawingTool.horizontalLine:
       case DrawingTool.verticalLine:
       case DrawingTool.text:
-      case DrawingTool.brush:
       case DrawingTool.htfOverlay:
         return 1;
       case DrawingTool.trendline:
@@ -45,6 +45,8 @@ enum DrawingTool {
       case DrawingTool.triangle:
       case DrawingTool.parallelChannel:
       case DrawingTool.fibExtension:
+      case DrawingTool.longPosition:
+      case DrawingTool.shortPosition:
         return 3;
     }
   }
@@ -75,12 +77,14 @@ enum DrawingTool {
         return 'Parallel Channel';
       case DrawingTool.fibExtension:
         return 'Fib Extension';
-      case DrawingTool.brush:
-        return 'Freehand Brush';
       case DrawingTool.callout:
         return 'Callout Box';
       case DrawingTool.htfOverlay:
         return 'HTF Level Overlay';
+      case DrawingTool.longPosition:
+        return 'Long Position';
+      case DrawingTool.shortPosition:
+        return 'Short Position';
     }
   }
 
@@ -98,8 +102,6 @@ enum DrawingTool {
         return 'Fib Retr.';
       case DrawingTool.fibExtension:
         return 'Fib Ext.';
-      case DrawingTool.brush:
-        return 'Brush';
       case DrawingTool.callout:
         return 'Callout';
       case DrawingTool.htfOverlay:
@@ -108,6 +110,10 @@ enum DrawingTool {
         return 'Measure';
       case DrawingTool.flatTopBottom:
         return 'Flat Top/Bot';
+      case DrawingTool.longPosition:
+        return 'Long Pos.';
+      case DrawingTool.shortPosition:
+        return 'Short Pos.';
       default:
         return label.substring(0, 10);
     }
@@ -208,6 +214,14 @@ class Drawing {
   /// Level label type for HTF Level Overlay tool ('PDH', 'PDL', 'PWH', 'PWL', 'DOpen').
   String get htfLevelType => properties?['htfLevelType'] as String? ?? 'PDH';
 
+  /// Whether this drawing represents a Smart Analysis tool object.
+  bool get isAnalysisObject =>
+      properties != null &&
+      (properties!.containsKey('analysisType') || properties!.containsKey('analysisMetadata'));
+
+  /// Analysis type name string if this is a Smart Analysis tool.
+  String? get analysisTypeId => properties?['analysisType'] as String?;
+
   const Drawing({
     required this.id,
     required this.tool,
@@ -243,16 +257,6 @@ class Drawing {
 
   bool get showHandles => properties?['showHandles'] as bool? ?? true;
   bool get showMidline => properties?['showMidline'] as bool? ?? true;
-
-  static int _parseColor(dynamic val, int defaultVal) {
-    if (val is int) return val;
-    if (val is String) {
-      var hex = val.replaceAll('#', '');
-      if (hex.length == 6) hex = 'FF$hex';
-      return int.tryParse(hex, radix: 16) ?? defaultVal;
-    }
-    return defaultVal;
-  }
 
   Drawing copyWith({
     List<DrawingAnchor>? anchors,

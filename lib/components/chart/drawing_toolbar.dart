@@ -24,6 +24,7 @@ class DrawingToolbar extends StatefulWidget {
 
 class _DrawingToolbarState extends State<DrawingToolbar> {
   bool _expanded = false;
+  int _selectedTab = 0;
 
   @override
   Widget build(BuildContext context) {
@@ -79,6 +80,7 @@ class _DrawingToolbarState extends State<DrawingToolbar> {
             colors: colors,
           ),
 
+
           const Spacer(),
 
           // Magnetic mode toggle.
@@ -91,6 +93,16 @@ class _DrawingToolbarState extends State<DrawingToolbar> {
             onTap: () {
               Haptics.selection();
               c.cycleMagneticMode();
+            },
+            colors: colors,
+          ),
+          _Action(
+            icon: Icons.all_inclusive_rounded,
+            label: 'Stay Mode',
+            active: c.isContinuousDrawing,
+            onTap: () {
+              Haptics.selection();
+              c.toggleContinuousDrawing();
             },
             colors: colors,
           ),
@@ -167,32 +179,104 @@ class _DrawingToolbarState extends State<DrawingToolbar> {
   }
 
   Widget _tools(DrawingController c, ThemePalette colors) {
-    return Container(
-      height: 52,
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(color: colors.border.withValues(alpha: 0.4)),
-        ),
-      ),
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        children: [
-          for (final tool in DrawingTool.values) ...[
-            _ToolButton(
-              icon: kDrawingToolIcons[tool]!,
-              label: tool.label,
-              active: c.activeTool == tool,
-              onTap: () {
-                Haptics.selection();
-                c.setActiveTool(tool);
-              },
-              colors: colors,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Toolbar Tab Switcher
+        Container(
+          height: 34,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          decoration: BoxDecoration(
+            color: colors.background.withValues(alpha: 0.5),
+            border: Border(
+              bottom: BorderSide(color: colors.border.withValues(alpha: 0.4)),
             ),
-            const SizedBox(width: 6),
-          ],
-        ],
-      ),
+          ),
+          child: Row(
+            children: [
+              _TabItem(
+                label: '✏ Drawing',
+                isSelected: _selectedTab == 0,
+                onTap: () {
+                  Haptics.selection();
+                  setState(() => _selectedTab = 0);
+                },
+                colors: colors,
+              ),
+              const SizedBox(width: 8),
+              _TabItem(
+                label: '💼 Trading',
+                isSelected: _selectedTab == 1,
+                onTap: () {
+                  Haptics.selection();
+                  setState(() => _selectedTab = 1);
+                },
+                colors: colors,
+              ),
+            ],
+          ),
+        ),
+
+        // Tab Content
+        if (_selectedTab == 0)
+          Container(
+            height: 52,
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: colors.border.withValues(alpha: 0.4)),
+              ),
+            ),
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              children: [
+                for (final tool in DrawingTool.values) ...[
+                  _ToolButton(
+                    icon: kDrawingToolIcons[tool]!,
+                    label: tool.label,
+                    active: c.activeTool == tool && c.activeAnalysisTool == null,
+                    onTap: () {
+                      Haptics.selection();
+                      c.setActiveTool(tool);
+                    },
+                    colors: colors,
+                  ),
+                  const SizedBox(width: 6),
+                ],
+              ],
+            ),
+          )
+        else if (_selectedTab == 1)
+          Container(
+            height: 52,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            child: Row(
+              children: [
+                _ToolButton(
+                  icon: Icons.trending_up,
+                  label: 'Long Position',
+                  active: c.activeTool == DrawingTool.longPosition,
+                  onTap: () {
+                    Haptics.selection();
+                    c.setActiveTool(DrawingTool.longPosition);
+                  },
+                  colors: colors,
+                ),
+                const SizedBox(width: 8),
+                _ToolButton(
+                  icon: Icons.trending_down,
+                  label: 'Short Position',
+                  active: c.activeTool == DrawingTool.shortPosition,
+                  onTap: () {
+                    Haptics.selection();
+                    c.setActiveTool(DrawingTool.shortPosition);
+                  },
+                  colors: colors,
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 
@@ -442,3 +526,44 @@ class _Action extends StatelessWidget {
     return Tooltip(message: tooltip!, child: content);
   }
 }
+
+class _TabItem extends StatelessWidget {
+  final String label;
+  final bool isSelected;
+  final VoidCallback onTap;
+  final ThemePalette colors;
+
+  const _TabItem({
+    required this.label,
+    required this.isSelected,
+    required this.onTap,
+    required this.colors,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: isSelected ? colors.primary.withValues(alpha: 0.18) : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: isSelected ? colors.primary : Colors.transparent,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+            color: isSelected ? colors.primary : colors.mutedForeground,
+          ),
+        ),
+      ),
+    );
+  }
+}
+

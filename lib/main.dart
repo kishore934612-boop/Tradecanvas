@@ -131,13 +131,23 @@ class _AppRoot extends StatefulWidget {
   State<_AppRoot> createState() => _AppRootState();
 }
 
-class _AppRootState extends State<_AppRoot> {
+class _AppRootState extends State<_AppRoot> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Symbols must load before the watchlist can resolve instruments.
     WidgetsBinding.instance.addPostFrameCallback((_) => _warmUp());
   }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {}
 
   Future<void> _warmUp() async {
     await context.read<SymbolRegistry>().load();

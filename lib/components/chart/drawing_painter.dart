@@ -9,6 +9,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import 'package:app/analysis_tools/painters/analysis_painter.dart';
 import 'package:app/components/chart/chart_layout.dart';
 import 'package:app/components/chart/chart_transform.dart';
 import 'package:app/components/chart/drawing_geometry.dart';
@@ -155,12 +156,12 @@ class DrawingPainter extends CustomPainter {
       _paintTriangle(canvas, d, paint, isPreview: isPreview);
     } else if (d.tool == DrawingTool.parallelChannel) {
       _paintParallelChannel(canvas, d, paint, isPreview: isPreview);
-    } else if (d.tool == DrawingTool.brush) {
-      _paintBrush(canvas, d, paint, isPreview: isPreview);
     } else if (d.tool == DrawingTool.callout) {
       _paintCallout(canvas, d, paint, isPreview: isPreview);
     } else if (d.tool == DrawingTool.htfOverlay) {
       _paintHtfOverlay(canvas, d, paint, isPreview: isPreview);
+    } else if (d.tool == DrawingTool.longPosition || d.tool == DrawingTool.shortPosition) {
+      _paintPosition(canvas, d, paint, isPreview: isPreview);
     } else {
       final segments =
           DrawingGeometry.segments(d, transform, chartWidth: layout.plotWidth);
@@ -181,6 +182,16 @@ class DrawingPainter extends CustomPainter {
     }
 
     if (isSelected) _paintHandles(canvas, d);
+
+    AnalysisPainter.paintIfAnalysis(
+      canvas,
+      d,
+      transform,
+      layout,
+      colors: colors,
+      isSelected: isSelected,
+      isPreview: isPreview,
+    );
   }
 
   void _paintAngleBadge(Canvas canvas, Drawing d) {
@@ -654,28 +665,7 @@ class DrawingPainter extends CustomPainter {
     }
   }
 
-  void _paintBrush(
-    Canvas canvas,
-    Drawing d,
-    Paint paint, {
-    bool isPreview = false,
-  }) {
-    final pts = DrawingGeometry.project(d, transform);
-    if (pts.length < 2) return;
 
-    final brushPaint = Paint()
-      ..color = isPreview ? d.color.withValues(alpha: 0.7) : d.color
-      ..strokeWidth = math.max(2.0, d.strokeWidth)
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round;
-
-    final path = Path()..moveTo(pts[0].dx, pts[0].dy);
-    for (var i = 1; i < pts.length; i++) {
-      path.lineTo(pts[i].dx, pts[i].dy);
-    }
-    canvas.drawPath(path, brushPaint);
-  }
 
   void _paintCallout(
     Canvas canvas,
@@ -710,12 +700,12 @@ class DrawingPainter extends CustomPainter {
     canvas.drawLine(targetTip, edgePoint, stemPaint);
 
     // Small triangle arrowhead at the target tip
-    final dir = (edgePoint - targetTip);
+    final dir = edgePoint - targetTip;
     final len = dir.distance;
     if (len > 1.0) {
       final norm = dir / len;
       final perp = Offset(-norm.dy, norm.dx);
-      final arrowSize = 6.0;
+      const arrowSize = 6.0;
       final arrowPath = Path()
         ..moveTo(targetTip.dx, targetTip.dy)
         ..lineTo(
@@ -791,22 +781,186 @@ class DrawingPainter extends CustomPainter {
   // HELPERS
   // ==========================================================
 
-  TextPainter _text(String s, Color color, double size) => TextPainter(
+  TextPainter _text(String s, Color color, double size, {FontWeight? fontWeight}) => TextPainter(
         text: TextSpan(
           text: s,
           style: TextStyle(
             color: color,
             fontSize: size,
-            fontWeight: FontWeight.w600,
+            fontWeight: fontWeight ?? FontWeight.w600,
             fontFeatures: const [ui.FontFeature.tabularFigures()],
           ),
         ),
         textDirection: TextDirection.ltr,
       )..layout();
 
-  void _dashedLine(Canvas canvas, Offset from, Offset to, Paint paint) {
-    const dash = 5.0;
-    const gap = 4.0;
+  void _paintPosition(
+    Canvas canvas,
+    Drawing d,
+    Paint paint, {
+    bool isPreview = false,
+  }) {
+    final pts = DrawingGeometry.project(d, transform);
+    if (pts.isEmpty) return;
+
+    final isLong = d.tool == DrawingTool.longPosition;
+    final entryY = pts[0].dy;
+    final entryPrice = d.anchors[0].price;
+
+    // Determine stop and target Y positions
+    final double stopY;
+    final double stopPrice;
+    final double targetY;
+    final double targetPrice;
+
+    if (pts.length >= 2) {
+      stopY = pts[1].dy;
+      stopPrice = d.anchors[1].price;
+    } else {
+      stopY = entryY;
+      stopPrice = entryPrice;
+    }
+
+    if (pts.length >= 3) {
+      targetY = pts[2].dy;
+      targetPrice = d.anchors[2].price;
+    } else {
+      targetY = entryY;
+      targetPrice = entryPrice;
+    }
+
+    // Calculate box width
+    final left = pts[0].dx;
+    final right = left + 200.0;
+
+    // Colors
+    const profitColor = Color(0xFF26A69A); // Teal green
+    const lossColor = Color(0xFFEF5350);   // Red
+    final entryColor = d.color;
+
+
+    // Draw target zone (entry to target)
+    if (pts.length >= 3) {
+      final targetTop = math.min(entryY, targetY);
+      final targetBottom = math.max(entryY, targetY);
+      final targetZoneColor = (isLong && targetY < entryY) || (!isLong && targetY > entryY)
+          ? profitColor
+          : lossColor;
+      final targetFill = Paint()
+        ..color = targetZoneColor.withValues(alpha: isPreview ? 0.12 : 0.18)
+        ..style = PaintingStyle.fill;
+      canvas.drawRect(
+        Rect.fromLTRB(left, targetTop, right, targetBottom),
+        targetFill,
+      );
+
+      // Target border line
+      final targetLinePaint = Paint()
+        ..color = targetZoneColor.withValues(alpha: 0.9)
+        ..strokeWidth = 1.2
+        ..style = PaintingStyle.stroke;
+      // Dashed target line
+      _dashedLine(canvas, Offset(left, targetY), Offset(right, targetY), targetLinePaint, dash: 4, gap: 3);
+
+      // Target price label
+      final priceDiff = targetPrice - entryPrice;
+      final pctChange = entryPrice != 0 ? (priceDiff / entryPrice * 100) : 0.0;
+      final targetLabel = '${priceDiff >= 0 ? "+" : ""}${priceDiff.toStringAsFixed(2)} (${pctChange.toStringAsFixed(1)}%)';
+      final tp = _text(targetLabel, targetZoneColor, 10, fontWeight: FontWeight.w600);
+      tp.paint(canvas, Offset(right - tp.width - 8, (targetTop + targetBottom) / 2 - tp.height / 2));
+    }
+
+    // Draw stop zone (entry to stop)
+    if (pts.length >= 2) {
+      final stopTop = math.min(entryY, stopY);
+      final stopBottom = math.max(entryY, stopY);
+      final stopZoneColor = (isLong && stopY > entryY) || (!isLong && stopY < entryY)
+          ? lossColor
+          : profitColor;
+      final stopFill = Paint()
+        ..color = stopZoneColor.withValues(alpha: isPreview ? 0.12 : 0.18)
+        ..style = PaintingStyle.fill;
+      canvas.drawRect(
+        Rect.fromLTRB(left, stopTop, right, stopBottom),
+        stopFill,
+      );
+
+      // Stop border line
+      final stopLinePaint = Paint()
+        ..color = stopZoneColor.withValues(alpha: 0.9)
+        ..strokeWidth = 1.2
+        ..style = PaintingStyle.stroke;
+      _dashedLine(canvas, Offset(left, stopY), Offset(right, stopY), stopLinePaint, dash: 4, gap: 3);
+
+      // Stop price label
+      final priceDiff = stopPrice - entryPrice;
+      final pctChange = entryPrice != 0 ? (priceDiff / entryPrice * 100) : 0.0;
+      final stopLabel = '${priceDiff >= 0 ? "+" : ""}${priceDiff.toStringAsFixed(2)} (${pctChange.toStringAsFixed(1)}%)';
+      final tp = _text(stopLabel, stopZoneColor, 10, fontWeight: FontWeight.w600);
+      tp.paint(canvas, Offset(right - tp.width - 8, (stopTop + stopBottom) / 2 - tp.height / 2));
+    }
+
+    // Entry line (solid)
+    final entryLinePaint = Paint()
+      ..color = entryColor
+      ..strokeWidth = 1.8
+      ..style = PaintingStyle.stroke;
+    canvas.drawLine(Offset(left, entryY), Offset(right, entryY), entryLinePaint);
+
+    // Entry label
+    final entryLabel = 'Entry ${entryPrice.toStringAsFixed(2)}';
+    final entryTp = _text(entryLabel, Colors.white, 10, fontWeight: FontWeight.w700);
+    final entryLabelBg = Rect.fromLTWH(
+      left + 4,
+      entryY - entryTp.height - 4,
+      entryTp.width + 10,
+      entryTp.height + 4,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(entryLabelBg, const Radius.circular(3)),
+      Paint()..color = entryColor.withValues(alpha: 0.85),
+    );
+    entryTp.paint(canvas, Offset(left + 9, entryY - entryTp.height - 2));
+
+    // Risk/Reward ratio label
+    if (pts.length >= 3) {
+      final reward = (targetPrice - entryPrice).abs();
+      final risk = (stopPrice - entryPrice).abs();
+      final rr = risk > 0 ? (reward / risk) : 0.0;
+      final rrLabel = 'R:R  1 : ${rr.toStringAsFixed(2)}';
+      final rrTp = _text(rrLabel, Colors.white70, 9, fontWeight: FontWeight.w500);
+
+      final rrBg = Rect.fromLTWH(
+        left + 4,
+        entryY + 4,
+        rrTp.width + 10,
+        rrTp.height + 4,
+      );
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(rrBg, const Radius.circular(3)),
+        Paint()..color = Colors.black54,
+      );
+      rrTp.paint(canvas, Offset(left + 9, entryY + 6));
+    }
+
+    // Position type icon
+    final typeLabel = isLong ? '▲ LONG' : '▼ SHORT';
+    final typeColor = isLong ? profitColor : lossColor;
+    final typeTp = _text(typeLabel, typeColor, 10, fontWeight: FontWeight.w800);
+    final typeBg = Rect.fromLTWH(
+      right - typeTp.width - 14,
+      entryY - typeTp.height - 4,
+      typeTp.width + 10,
+      typeTp.height + 4,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(typeBg, const Radius.circular(3)),
+      Paint()..color = Colors.black54,
+    );
+    typeTp.paint(canvas, Offset(right - typeTp.width - 9, entryY - typeTp.height - 2));
+  }
+
+  void _dashedLine(Canvas canvas, Offset from, Offset to, Paint paint, {double dash = 5.0, double gap = 4.0}) {
     final total = (to - from).distance;
     if (total <= 0) return;
     final dir = (to - from) / total;

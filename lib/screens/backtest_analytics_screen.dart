@@ -104,7 +104,7 @@ class _BacktestAnalyticsScreenState extends State<BacktestAnalyticsScreen> {
                   colors,
                   'Win Rate',
                   '${winRate.toStringAsFixed(1)}%',
-                  '${wins}/${totalTrades} Wins',
+                  '$wins/$totalTrades Wins',
                   winRate >= 50 ? colors.positive : colors.foreground,
                 ),
                 const SizedBox(width: 10),
@@ -137,6 +137,63 @@ class _BacktestAnalyticsScreenState extends State<BacktestAnalyticsScreen> {
                 ),
               ],
             ),
+            const SizedBox(height: 10),
+            Builder(builder: (context) {
+              final closedPnls = closedTrades.map((t) => t.pnl(widget.currentPrice)).toList();
+              final maxWin = closedPnls.isNotEmpty ? closedPnls.fold<double>(0, (a, b) => a > b ? a : b) : 0.0;
+              final maxLoss = closedPnls.isNotEmpty ? closedPnls.fold<double>(0, (a, b) => a < b ? a : b) : 0.0;
+              final rrs = closedTrades
+                  .map((t) => t.achievedRiskReward(widget.currentPrice))
+                  .whereType<double>()
+                  .toList();
+              final avgRr = rrs.isNotEmpty ? rrs.reduce((a, b) => a + b) / rrs.length : 0.0;
+
+              return Column(
+                children: [
+                  Row(
+                    children: [
+                      _metricCard(
+                        colors,
+                        'Best Trade',
+                        maxWin > 0 ? '+\$${maxWin.toStringAsFixed(2)}' : '—',
+                        'Largest Win',
+                        colors.positive,
+                      ),
+                      const SizedBox(width: 10),
+                      _metricCard(
+                        colors,
+                        'Worst Trade',
+                        maxLoss < 0 ? '-\$${maxLoss.abs().toStringAsFixed(2)}' : '—',
+                        'Largest Loss',
+                        colors.negative,
+                      ),
+                    ],
+                  ),
+                  if (rrs.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        _metricCard(
+                          colors,
+                          'Avg Risk:Reward',
+                          '1:${avgRr.toStringAsFixed(2)}',
+                          'Realized R:R Ratio',
+                          avgRr >= 1.5 ? colors.positive : colors.foreground,
+                        ),
+                        const SizedBox(width: 10),
+                        _metricCard(
+                          colors,
+                          'TP / SL Hits',
+                          '${closedTrades.where((t) => t.closedByTp).length} / ${closedTrades.where((t) => t.closedBySl).length}',
+                          'Auto-Exit Stats',
+                          colors.primary,
+                        ),
+                      ],
+                    ),
+                  ],
+                ],
+              );
+            }),
             const SizedBox(height: 16),
 
             // Breakdown Section

@@ -1,10 +1,19 @@
-/// Replay Controller — steps through historical candles bar-by-bar.
+/// Replay Controller — steps through historical candles bar-by-bar with
+/// a full order execution simulation engine.
 ///
 /// Loads a fixed historical window once, then exposes a growing prefix of it
 /// as the "current" candle set, advancing one bar at a time (manually or on a
 /// timer). This lets [ChartView] render replay exactly like a live chart —
 /// it never knows the difference — while indicators recompute against only
 /// the bars "seen so far", the same way they would as a live session unfolds.
+///
+/// Enhanced features:
+/// - Market, Limit, and Stop-Market order simulation
+/// - Automatic TP/SL execution on candle advance
+/// - Account balance tracking with session P&L
+/// - Discipline guardrails (max drawdown, consecutive losses, max trades)
+/// - Higher-timeframe (HTF) data for MTF SMC dashboard
+/// - Volume Profile computation over visible candle window
 library;
 
 import 'dart:async';
@@ -16,8 +25,14 @@ import 'package:app/core/logging/logger.dart';
 import 'package:app/data/providers/market/binance_provider.dart';
 import 'package:app/domain/entities/candle_data.dart';
 import 'package:app/engine/chart_data_source.dart';
+import 'package:app/engine/discipline_guardrails.dart';
 import 'package:app/engine/indicators.dart';
+import 'package:app/engine/smc_engine.dart';
+import 'package:app/engine/volume_profile_engine.dart';
+import 'package:app/models/indicator_style.dart';
 import 'package:app/models/instrument.dart';
+import 'package:app/models/replay_order.dart';
+import 'package:app/models/smc_type.dart';
 
 /// How many historical candles to load for a replay session.
 const int kReplayCandleCount = 500;
@@ -36,6 +51,28 @@ enum ReplaySpeed {
   const ReplaySpeed(this.barsPerSecond, this.label);
   final double barsPerSecond;
   final String label;
+}
+
+/// Maps a replay timeframe to the next-higher timeframe for MTF analysis.
+Timeframe _higherTimeframe(Timeframe tf) {
+  switch (tf) {
+    case Timeframe.m1:
+      return Timeframe.m15;
+    case Timeframe.m5:
+      return Timeframe.h1;
+    case Timeframe.m15:
+      return Timeframe.h4;
+    case Timeframe.m30:
+      return Timeframe.h4;
+    case Timeframe.h1:
+      return Timeframe.d1;
+    case Timeframe.h4:
+      return Timeframe.d1;
+    case Timeframe.d1:
+      return Timeframe.w1;
+    case Timeframe.w1:
+      return Timeframe.w1;
+  }
 }
 
 class ReplayController extends ChangeNotifier implements ChartDataSource {
@@ -60,6 +97,64 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
   ReplaySpeed _speed = ReplaySpeed.x1;
 
   Timer? _tickTimer;
+
+  // ==========================================================
+  // ORDER EXECUTION ENGINE
+  // ==========================================================
+
+  /// Pending orders waiting to be triggered.
+  final List<ReplayOrder> _pendingOrders = [];
+
+  /// Filled / open positions.
+  final List<ReplayOrder> _filledOrders = [];
+
+  /// All closed (completed) trades for analytics.
+  final List<ReplayOrder> _closedTrades = [];
+
+  /// Simulated account balance.
+  double _accountBalance = 10000.0;
+  double _startingBalance = 10000.0;
+
+  /// Risk percentage per trade (default 1%).
+  double _riskPercent = 1.0;
+
+  /// Consecutive loss counter for discipline guardrails.
+  int _consecutiveLosses = 0;
+
+  /// Discipline guardrail settings.
+  DisciplineSettings _disciplineSettings = const DisciplineSettings();
+
+  /// Active guardrail violation (null = trading permitted).
+  GuardrailViolation? _activeViolation;
+
+  /// Order ID counter.
+  int _nextOrderId = 1;
+
+  // ==========================================================
+  // MTF & VOLUME PROFILE
+  // ==========================================================
+
+  /// Higher-timeframe candles for MTF SMC dashboard.
+  List<CandleData> _htfCandles = [];
+
+  /// HTF trend analysis result.
+  SmcTrend? _htfTrend;
+
+  /// Volume Profile computed over the visible candle window.
+  VolumeProfileResult? _volumeProfile;
+
+  /// Whether volume profile is enabled.
+  bool _volumeProfileEnabled = false;
+
+  // ==========================================================
+  // CALLBACKS
+  // ==========================================================
+
+  /// Called when an order is filled.
+  VoidCallback? onOrderFilled;
+
+  /// Called when a position is closed (TP/SL hit or manual).
+  VoidCallback? onPositionClosed;
 
   ReplayController({
     required BinanceProvider provider,
@@ -171,6 +266,48 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
   bool get isAtStart => barsElapsed <= 0;
 
   // ==========================================================
+  // ORDER EXECUTION STATE
+  // ==========================================================
+
+  List<ReplayOrder> get pendingOrders => List.unmodifiable(_pendingOrders);
+  List<ReplayOrder> get openPositions =>
+      List.unmodifiable(_filledOrders.where((o) => o.isOpen));
+  List<ReplayOrder> get closedTrades => List.unmodifiable(_closedTrades);
+
+  /// Current open position (if any). Only one position at a time.
+  ReplayOrder? get openPosition =>
+      _filledOrders.where((o) => o.isOpen).firstOrNull;
+
+  double get accountBalance => _accountBalance;
+  double get startingBalance => _startingBalance;
+  double get sessionPnl => _accountBalance - _startingBalance;
+  double get riskPercent => _riskPercent;
+  int get consecutiveLosses => _consecutiveLosses;
+  int get totalTradesTaken => _closedTrades.length;
+
+  DisciplineSettings get disciplineSettings => _disciplineSettings;
+  GuardrailViolation? get activeViolation => _activeViolation;
+
+  // ==========================================================
+  // MTF & VOLUME PROFILE STATE
+  // ==========================================================
+
+  SmcTrend? get htfTrend => _htfTrend;
+  Timeframe get htfTimeframe => _higherTimeframe(_timeframe);
+  VolumeProfileResult? get volumeProfile => _volumeProfile;
+  bool get volumeProfileEnabled => _volumeProfileEnabled;
+
+  void toggleVolumeProfile() {
+    _volumeProfileEnabled = !_volumeProfileEnabled;
+    if (_volumeProfileEnabled) {
+      _recomputeVolumeProfile();
+    } else {
+      _volumeProfile = null;
+    }
+    notifyListeners();
+  }
+
+  // ==========================================================
   // LOADING
   // ==========================================================
 
@@ -206,9 +343,53 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
 
     _playhead = kReplayLeadIn - 1;
     _recompute();
+
+    // Load HTF data for MTF dashboard.
+    await _loadHtfData();
+
     _isLoading = false;
     _error = null;
     notifyListeners();
+  }
+
+  Future<void> _loadHtfData() async {
+    try {
+      final htfTf = _higherTimeframe(_timeframe);
+      if (htfTf == _timeframe) {
+        _htfCandles = [];
+        _htfTrend = null;
+        return;
+      }
+      _htfCandles = await _provider.fetchOHLC(
+        _instrument.symbol,
+        htfTf.apiValue,
+        limit: 200,
+      );
+      _recomputeHtfTrend();
+    } catch (e) {
+      _logger.warning('HTF data load failed: $e');
+      _htfCandles = [];
+      _htfTrend = null;
+    }
+  }
+
+  void _recomputeHtfTrend() {
+    if (_htfCandles.length < 20) {
+      _htfTrend = null;
+      return;
+    }
+    _htfTrend = SmcEngine.evaluateTrend(
+      candles: _htfCandles,
+      settings: const SmcSettings(),
+    );
+  }
+
+  void _recomputeVolumeProfile() {
+    if (!_volumeProfileEnabled || _playhead < 0) {
+      _volumeProfile = null;
+      return;
+    }
+    _volumeProfile = VolumeProfileEngine.compute(candles, bins: 40);
   }
 
   Future<void> setInstrument(Instrument instrument) async {
@@ -221,6 +402,223 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
     if (tf == _timeframe) return;
     _timeframe = tf;
     await load();
+  }
+
+  // ==========================================================
+  // ACCOUNT & RISK SETTINGS
+  // ==========================================================
+
+  void setAccountBalance(double balance) {
+    _accountBalance = balance;
+    _startingBalance = balance;
+    notifyListeners();
+  }
+
+  void setRiskPercent(double percent) {
+    _riskPercent = percent.clamp(0.1, 10.0);
+    notifyListeners();
+  }
+
+  void setDisciplineSettings(DisciplineSettings settings) {
+    _disciplineSettings = settings;
+    // Re-check violations with new settings.
+    _checkDiscipline();
+    notifyListeners();
+  }
+
+  // ==========================================================
+  // ORDER PLACEMENT
+  // ==========================================================
+
+  /// Place a new order. Returns the order ID, or null if blocked by guardrails.
+  String? placeOrder({
+    required OrderSide side,
+    required OrderType type,
+    required double price,
+    double? stopLossPrice,
+    double? takeProfitPrice,
+    required double positionSize,
+    required double quantity,
+  }) {
+    // Check discipline guardrails.
+    if (_activeViolation != null) return null;
+
+    // Only one position at a time.
+    if (openPosition != null && type == OrderType.market) return null;
+
+    final id = 'order_${_nextOrderId++}';
+    final order = ReplayOrder(
+      id: id,
+      side: side,
+      type: type,
+      price: price,
+      stopLossPrice: stopLossPrice,
+      takeProfitPrice: takeProfitPrice,
+      positionSize: positionSize,
+      quantity: quantity,
+      createdAtBar: _playhead,
+      createdAtTimestamp: _playhead >= 0 ? _fullHistory[_playhead].timestamp : 0,
+    );
+
+    if (type == OrderType.market) {
+      // Fill immediately at current close price.
+      _fillOrder(order, _playhead >= 0 ? _fullHistory[_playhead].close : price);
+    } else {
+      _pendingOrders.add(order);
+    }
+
+    notifyListeners();
+    return id;
+  }
+
+  /// Cancel a pending order.
+  void cancelOrder(String id) {
+    _pendingOrders.removeWhere((o) {
+      if (o.id == id) {
+        o.status = OrderStatus.cancelled;
+        return true;
+      }
+      return false;
+    });
+    notifyListeners();
+  }
+
+  /// Modify TP/SL on an open position.
+  void modifyPosition({double? stopLossPrice, double? takeProfitPrice}) {
+    final pos = openPosition;
+    if (pos == null) return;
+    if (stopLossPrice != null) pos.stopLossPrice = stopLossPrice;
+    if (takeProfitPrice != null) pos.takeProfitPrice = takeProfitPrice;
+    notifyListeners();
+  }
+
+  /// Manually close the open position at current market price.
+  void closePosition() {
+    final pos = openPosition;
+    if (pos == null || _playhead < 0) return;
+    _closeOrder(pos, _fullHistory[_playhead].close, 'manual_close');
+    notifyListeners();
+  }
+
+  void _fillOrder(ReplayOrder order, double fillPrice) {
+    order.status = OrderStatus.filled;
+    order.fillPrice = fillPrice;
+    order.filledAtBar = _playhead;
+    order.filledAtTimestamp = _playhead >= 0 ? _fullHistory[_playhead].timestamp : 0;
+    _filledOrders.add(order);
+    _logger.info('Order filled: ${order.id} ${order.side.name} @ $fillPrice');
+    onOrderFilled?.call();
+  }
+
+  void _closeOrder(ReplayOrder order, double exitPrice, String reason) {
+    order.exitPrice = exitPrice;
+    order.exitAtBar = _playhead;
+    order.exitAtTimestamp = _playhead >= 0 ? _fullHistory[_playhead].timestamp : 0;
+    order.exitReason = reason;
+
+    // Update account balance.
+    final pnl = order.realizedPnl();
+    _accountBalance += pnl;
+
+    // Track consecutive losses.
+    if (pnl < 0) {
+      _consecutiveLosses++;
+    } else {
+      _consecutiveLosses = 0;
+    }
+
+    _closedTrades.add(order);
+    _logger.info('Position closed: ${order.id} reason=$reason pnl=${pnl.toStringAsFixed(2)}');
+    onPositionClosed?.call();
+
+    // Check discipline guardrails after close.
+    _checkDiscipline();
+  }
+
+  /// Process pending orders and TP/SL against the current candle.
+  void _processOrders() {
+    if (_playhead < 0) return;
+    final candle = _fullHistory[_playhead];
+
+    // 1. Check pending limit/stop orders.
+    final toRemove = <ReplayOrder>[];
+    for (final order in _pendingOrders) {
+      bool shouldFill = false;
+      double fillPrice = order.price;
+
+      if (order.type == OrderType.limit) {
+        if (order.side == OrderSide.buy && candle.low <= order.price) {
+          shouldFill = true;
+          fillPrice = order.price;
+        } else if (order.side == OrderSide.sell && candle.high >= order.price) {
+          shouldFill = true;
+          fillPrice = order.price;
+        }
+      } else if (order.type == OrderType.stopMarket) {
+        if (order.side == OrderSide.buy && candle.high >= order.price) {
+          shouldFill = true;
+          fillPrice = order.price;
+        } else if (order.side == OrderSide.sell && candle.low <= order.price) {
+          shouldFill = true;
+          fillPrice = order.price;
+        }
+      }
+
+      if (shouldFill && openPosition == null) {
+        _fillOrder(order, fillPrice);
+        toRemove.add(order);
+      }
+    }
+    _pendingOrders.removeWhere((o) => toRemove.contains(o));
+
+    // 2. Check TP/SL on open positions.
+    final positions = _filledOrders.where((o) => o.isOpen).toList();
+    for (final pos in positions) {
+      // Check Stop Loss first (SL has priority over TP for risk management).
+      if (pos.stopLossPrice != null) {
+        if (pos.isLong && candle.low <= pos.stopLossPrice!) {
+          _closeOrder(pos, pos.stopLossPrice!, 'sl_hit');
+          continue;
+        }
+        if (pos.isShort && candle.high >= pos.stopLossPrice!) {
+          _closeOrder(pos, pos.stopLossPrice!, 'sl_hit');
+          continue;
+        }
+      }
+
+      // Check Take Profit.
+      if (pos.takeProfitPrice != null) {
+        if (pos.isLong && candle.high >= pos.takeProfitPrice!) {
+          _closeOrder(pos, pos.takeProfitPrice!, 'tp_hit');
+          continue;
+        }
+        if (pos.isShort && candle.low <= pos.takeProfitPrice!) {
+          _closeOrder(pos, pos.takeProfitPrice!, 'tp_hit');
+          continue;
+        }
+      }
+    }
+  }
+
+  void _checkDiscipline() {
+    _activeViolation = DisciplineGuardrails.checkViolation(
+      settings: _disciplineSettings,
+      startingBalance: _startingBalance,
+      currentBalance: _accountBalance,
+      consecutiveLosses: _consecutiveLosses,
+      totalTrades: _closedTrades.length,
+    );
+  }
+
+  /// Reset the entire trading session (balance, trades, guardrails).
+  void resetSession() {
+    _pendingOrders.clear();
+    _filledOrders.clear();
+    _closedTrades.clear();
+    _accountBalance = _startingBalance;
+    _consecutiveLosses = 0;
+    _activeViolation = null;
+    notifyListeners();
   }
 
   // ==========================================================
@@ -258,6 +656,7 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
       return;
     }
     _playhead++;
+    _processOrders();
     _recompute();
     notifyListeners();
     if (isAtEnd) pause();
@@ -290,6 +689,18 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
     notifyListeners();
   }
 
+  final Map<IndicatorType, IndicatorStyle> _indicatorStyles = {};
+
+  @override
+  Map<IndicatorType, IndicatorStyle> get indicatorStyles =>
+      Map.unmodifiable(_indicatorStyles);
+
+  @override
+  void setIndicatorStyle(IndicatorType t, IndicatorStyle style) {
+    _indicatorStyles[t] = style;
+    notifyListeners();
+  }
+
   void _scheduleTick() {
     _tickTimer?.cancel();
     final intervalMs = (1000 / _speed.barsPerSecond).round();
@@ -307,6 +718,9 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
     // genuinely warms up over the replay rather than being visible from bar 1
     // using future data it shouldn't have access to yet.
     _indicators = CandleEngine.computeAll(candles);
+    if (_volumeProfileEnabled) {
+      _recomputeVolumeProfile();
+    }
   }
 
   @override

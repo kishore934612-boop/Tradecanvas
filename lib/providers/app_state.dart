@@ -10,7 +10,6 @@ import 'package:flutter/material.dart';
 
 import 'package:app/core/di/service_locator.dart';
 import 'package:app/core/logging/logger.dart';
-import 'package:app/engine/session_overlay.dart';
 import 'package:app/models/user_profile.dart';
 import 'package:app/services/persistence/persistence_service.dart';
 import 'package:app/services/persistence/shared_preferences_persistence.dart';
@@ -219,14 +218,6 @@ class AppState extends ChangeNotifier {
 
   void setRightOffsetPercent(double percent) {
     _profile.rightOffsetPercent = percent;
-    _save();
-    notifyListeners();
-  }
-
-
-
-  void setSessionConfig(SessionOverlayConfig config) {
-    _profile.sessionConfig = config;
     _save();
     notifyListeners();
   }

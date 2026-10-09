@@ -174,14 +174,6 @@ class DrawingGeometry {
         }
         return segs;
 
-      case DrawingTool.brush:
-        if (pts.length < 2) return const [];
-        final segs = <ChartSegment>[];
-        for (var i = 0; i < pts.length - 1; i++) {
-          segs.add(ChartSegment(pts[i], pts[i + 1]));
-        }
-        return segs;
-
       case DrawingTool.callout:
         if (pts.length < 2) return const [];
         return [ChartSegment(pts[0], pts[1])];
@@ -189,7 +181,26 @@ class DrawingGeometry {
       case DrawingTool.htfOverlay:
         if (pts.isEmpty) return const [];
         final y = pts[0].dy;
-        return [ChartSegment(Offset(0, y), Offset(chartWidth ?? 10000, y))];
+        return [ChartSegment(Offset(0, y), Offset(chartWidth, y))];
+
+      case DrawingTool.longPosition:
+      case DrawingTool.shortPosition:
+        if (pts.length < 2) return const [];
+        // Entry line, stop line, target line (all horizontal), plus vertical edges
+        final entry = pts[0];
+        final stop = pts.length >= 2 ? pts[1] : entry;
+        final target = pts.length >= 3 ? pts[2] : entry;
+        final minX = math.min(entry.dx, math.min(stop.dx, target.dx));
+        final maxX = math.max(entry.dx, math.max(stop.dx, target.dx));
+        final w = math.max(maxX - minX, 80.0);
+        final left = minX;
+        final right = left + w;
+        return [
+          ChartSegment(Offset(left, entry.dy), Offset(right, entry.dy)),
+          ChartSegment(Offset(left, stop.dy), Offset(right, stop.dy)),
+          if (pts.length >= 3)
+            ChartSegment(Offset(left, target.dy), Offset(right, target.dy)),
+        ];
     }
   }
 
@@ -325,6 +336,27 @@ class DrawingGeometry {
       final b2 = b + offset;
       if (_isPointInTriangle(point, a, b, b2) || _isPointInTriangle(point, a, b2, a2)) {
         return true;
+      }
+    }
+
+    if (drawing.tool == DrawingTool.longPosition || drawing.tool == DrawingTool.shortPosition) {
+      if (pts.length >= 2) {
+        final entry = pts[0];
+        final stop = pts[1];
+        final target = pts.length >= 3 ? pts[2] : entry;
+        final minX = math.min(entry.dx, math.min(stop.dx, target.dx));
+        final maxX = math.max(entry.dx, math.max(stop.dx, target.dx));
+        final w = math.max(maxX - minX, 80.0);
+        final left = minX;
+        final right = left + w;
+        // Stop zone
+        final stopRect = Rect.fromLTRB(left, math.min(entry.dy, stop.dy), right, math.max(entry.dy, stop.dy));
+        if (stopRect.inflate(tolerance).contains(point)) return true;
+        // Target zone
+        if (pts.length >= 3) {
+          final targetRect = Rect.fromLTRB(left, math.min(entry.dy, target.dy), right, math.max(entry.dy, target.dy));
+          if (targetRect.inflate(tolerance).contains(point)) return true;
+        }
       }
     }
 

@@ -1,13 +1,15 @@
-/// Settings — profile preferences, chart customization, appearance and system settings.
+/// Profile Screen — user profile overview, persona, favorite coins, and Settings navigation card.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'package:app/components/ui.dart';
+import 'package:app/constants/app_info.dart';
 import 'package:app/constants/colors.dart';
 import 'package:app/providers/app_state.dart';
-import 'package:app/screens/chart_customization_screen.dart';
+import 'package:app/providers/market_data_provider.dart';
+import 'package:app/screens/settings_detail_screen.dart';
 import 'package:app/utils/haptics.dart';
 
 class SettingsScreen extends StatelessWidget {
@@ -24,26 +26,23 @@ class SettingsScreen extends StatelessWidget {
         bottom: false,
         child: Column(
           children: [
-            const ScreenHeader(title: 'Settings'),
+            const ScreenHeader(title: 'Profile'),
             Expanded(
               child: ListView(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 children: [
-                  const _SectionLabel('Profile & Preferences'),
+                  const _SectionLabel('Trader Profile'),
                   _UnifiedProfileCard(appState: appState),
-                  const _SectionLabel('Appearance & Canvas'),
-                  _AppearanceCanvasCard(appState: appState),
-                  const _SectionLabel('App Preferences'),
-                  _HapticsCard(appState: appState),
-                  const _SectionLabel('System & Data'),
-                  const _ClearDataCard(),
+
+                  const _SectionLabel('System Settings'),
+                  _SettingsNavCard(),
+
                   const SizedBox(height: 28),
                   Center(
                     child: Column(
                       children: [
                         Text(
-                          'TradeCanvas v2.4.0',
+                          appDisplayVersion,
                           style: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.bold,
@@ -52,7 +51,7 @@ class SettingsScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 3),
                         Text(
-                          'Market data provided by Binance WS Engine',
+                          'Technical Analysis Engine & WS Market Stream',
                           style: TextStyle(
                             fontSize: 11,
                             color: colors.mutedForeground.withValues(alpha: 0.8),
@@ -88,6 +87,70 @@ class _SectionLabel extends StatelessWidget {
           fontWeight: FontWeight.w800,
           letterSpacing: 1.0,
           color: colors.mutedForeground,
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// SETTINGS NAVIGATION CARD
+// ============================================================
+
+class _SettingsNavCard extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+
+    return GlassCard(
+      margin: EdgeInsets.zero,
+      padding: const EdgeInsets.all(16),
+      child: InkWell(
+        onTap: () {
+          Haptics.selection();
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => const SettingsDetailScreen(),
+            ),
+          );
+        },
+        borderRadius: BorderRadius.circular(10),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: colors.primary.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(Icons.settings_rounded, size: 22, color: colors.primary),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Settings',
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                      color: colors.foreground,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Theme mode, chart customization, preferences & legal',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: colors.mutedForeground,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right_rounded, color: colors.mutedForeground, size: 24),
+          ],
         ),
       ),
     );
@@ -185,12 +248,14 @@ class _UnifiedProfileCardState extends State<_UnifiedProfileCard> {
                               if (currentFavs.length < 5) {
                                 currentFavs.add(coin);
                                 widget.appState.setFavoriteCoins(currentFavs);
+                                context.read<MarketDataProvider>().replaceWatchlist(currentFavs);
                                 setSheetState(() {});
                               }
                             } else {
                               if (currentFavs.length > 1) {
                                 currentFavs.remove(coin);
                                 widget.appState.setFavoriteCoins(currentFavs);
+                                context.read<MarketDataProvider>().replaceWatchlist(currentFavs);
                                 setSheetState(() {});
                               }
                             }
@@ -282,6 +347,145 @@ class _UnifiedProfileCardState extends State<_UnifiedProfileCard> {
     );
   }
 
+  void _showEditNameDialog(BuildContext context) {
+    final controller =
+        TextEditingController(text: widget.appState.username ?? '');
+    final colors = AppColors.of(context);
+    String? errorMessage;
+
+    showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: colors.card,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: colors.primary.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(Icons.badge_rounded, color: colors.primary, size: 20),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Edit Display Name',
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                      color: colors.foreground,
+                    ),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Enter a new display name for your trading profile.',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      color: colors.mutedForeground,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: controller,
+                    autofocus: true,
+                    textCapitalization: TextCapitalization.words,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: colors.foreground,
+                    ),
+                    decoration: InputDecoration(
+                      hintText: 'Display name',
+                      hintStyle: TextStyle(color: colors.mutedForeground),
+                      filled: true,
+                      fillColor: colors.background,
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 12),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(
+                          color: errorMessage != null
+                              ? colors.negative
+                              : colors.border.withValues(alpha: 0.6),
+                        ),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(
+                          color: errorMessage != null
+                              ? colors.negative
+                              : colors.primary,
+                          width: 1.5,
+                        ),
+                      ),
+                    ),
+                    onChanged: (_) {
+                      if (errorMessage != null) {
+                        setDialogState(() => errorMessage = null);
+                      }
+                    },
+                  ),
+                  if (errorMessage != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      errorMessage!,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                        color: colors.negative,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text(
+                    'Cancel',
+                    style: TextStyle(color: colors.mutedForeground),
+                  ),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    final newName = controller.text.trim();
+                    if (newName.isEmpty) {
+                      setDialogState(
+                          () => errorMessage = 'Name cannot be empty.');
+                      return;
+                    }
+                    Haptics.selection();
+                    widget.appState.updateDisplayName(newName);
+                    Navigator.pop(ctx);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: colors.primary,
+                    foregroundColor: colors.primaryForeground,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  child: const Text('Save'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
@@ -310,22 +514,50 @@ class _UnifiedProfileCardState extends State<_UnifiedProfileCard> {
               ),
               const SizedBox(width: 14),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      displayName,
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: colors.foreground,
-                      ),
+                child: InkWell(
+                  onTap: () => _showEditNameDialog(context),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        vertical: 4, horizontal: 2),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Flexible(
+                              child: Text(
+                                displayName,
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: colors.foreground,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Icon(
+                              Icons.edit_rounded,
+                              size: 14,
+                              color: colors.primary,
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 1),
+                        Text(
+                          'Tap to edit name',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: colors.mutedForeground,
+                          ),
+                        ),
+                      ],
                     ),
-
-                  ],
+                  ),
                 ),
               ),
-
             ],
           ),
 
@@ -508,250 +740,6 @@ class _UnifiedProfileCardState extends State<_UnifiedProfileCard> {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-// ============================================================
-// APPEARANCE & CANVAS CARD (Single container with icon theme toggle)
-// ============================================================
-
-class _AppearanceCanvasCard extends StatelessWidget {
-  final AppState appState;
-  const _AppearanceCanvasCard({required this.appState});
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = AppColors.of(context);
-    final isDark = appState.themeMode == ThemeMode.dark;
-
-    return GlassCard(
-      margin: EdgeInsets.zero,
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          // Row 1: App Visual Theme with Theme Switch Icon Button
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: colors.primary.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(
-                  isDark ? Icons.dark_mode_rounded : Icons.light_mode_rounded,
-                  size: 20,
-                  color: colors.primary,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'App Visual Theme',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                        color: colors.foreground,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      isDark ? 'Dark Theme Active' : 'Light Theme Active',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: colors.mutedForeground,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              IconButton(
-                tooltip: 'Switch theme',
-                onPressed: () {
-                  Haptics.selection();
-                  appState.setThemeMode(
-                    isDark ? ThemeMode.light : ThemeMode.dark,
-                  );
-                },
-                icon: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 200),
-                  child: Icon(
-                    isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-                    key: ValueKey(isDark),
-                    color: colors.primary,
-                    size: 22,
-                  ),
-                ),
-              ),
-            ],
-          ),
-
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Divider(height: 1, color: colors.border.withValues(alpha: 0.5)),
-          ),
-
-          // Row 2: Chart Customization
-          InkWell(
-            onTap: () {
-              Haptics.selection();
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => const ChartCustomizationScreen(),
-                ),
-              );
-            },
-            borderRadius: BorderRadius.circular(10),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: colors.primary.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(Icons.tune_rounded, size: 20, color: colors.primary),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Chart Customization',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                          color: colors.foreground,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        'Candle templates & grid styles',
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          color: colors.mutedForeground,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                Icon(Icons.chevron_right_rounded,
-                    color: colors.mutedForeground, size: 22),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ============================================================
-// HAPTICS CARD
-// ============================================================
-
-class _HapticsCard extends StatelessWidget {
-  final AppState appState;
-  const _HapticsCard({required this.appState});
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = AppColors.of(context);
-    final enabled = appState.profile.hapticsEnabled;
-
-    return GlassCard(
-      margin: EdgeInsets.zero,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Row(
-        children: [
-          Icon(Icons.vibration_rounded, size: 20, color: colors.primary),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              'Haptic Touch Feedback',
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.bold,
-                color: colors.foreground,
-              ),
-            ),
-          ),
-          Switch.adaptive(
-            value: enabled,
-            activeTrackColor: colors.primary,
-            onChanged: (val) {
-              Haptics.selection();
-              appState.setHaptics(val);
-            },
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ============================================================
-// CLEAR DATA CARD
-// ============================================================
-
-class _ClearDataCard extends StatelessWidget {
-  const _ClearDataCard();
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = AppColors.of(context);
-
-    return GlassCard(
-      margin: EdgeInsets.zero,
-      padding: const EdgeInsets.all(16),
-      child: InkWell(
-        onTap: () {
-          Haptics.selection();
-          showDialog<void>(
-            context: context,
-            builder: (ctx) => AlertDialog(
-              title: const Text('Reset App Preferences?'),
-              content: const Text(
-                  'This will reset chart background, candle themes and preferences back to defaults.'),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Cancel'),
-                ),
-                TextButton(
-                  onPressed: () {
-                    context.read<AppState>().resetPreferences();
-                    Navigator.pop(ctx);
-                  },
-                  child: const Text('Reset Defaults'),
-                ),
-              ],
-            ),
-          );
-        },
-        child: Row(
-          children: [
-            Icon(Icons.restart_alt_rounded,
-                size: 20, color: colors.destructive),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                'Reset Preferences & Cache',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: colors.destructive,
-                ),
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

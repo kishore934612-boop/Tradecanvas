@@ -254,4 +254,40 @@ void main() {
       expect(c.canUndo, isTrue, reason: 'BTCUSDT history is preserved');
     });
   });
+
+  group('continuous drawing mode', () {
+    test('tool resets to null after commit when continuous mode is false', () async {
+      final repo = FakeDrawingRepository();
+      final c = _controller(repo);
+
+      c.setActiveTool(DrawingTool.trendline);
+      await c.addAnchor(const DrawingAnchor(timestamp: 0, price: 100));
+      await c.addAnchor(const DrawingAnchor(timestamp: 10, price: 110));
+
+      expect(c.drawings, hasLength(1));
+      expect(c.activeTool, isNull);
+    });
+
+    test('tool stays active after commit when continuous mode is true', () async {
+      final repo = FakeDrawingRepository();
+      final c = _controller(repo);
+
+      c.setContinuousDrawing(true);
+      expect(c.isContinuousDrawing, isTrue);
+
+      c.setActiveTool(DrawingTool.trendline);
+      await c.addAnchor(const DrawingAnchor(timestamp: 0, price: 100));
+      await c.addAnchor(const DrawingAnchor(timestamp: 10, price: 110));
+
+      expect(c.drawings, hasLength(1));
+      expect(c.activeTool, DrawingTool.trendline);
+
+      // Add a second line immediately without reselecting the tool
+      await c.addAnchor(const DrawingAnchor(timestamp: 20, price: 120));
+      await c.addAnchor(const DrawingAnchor(timestamp: 30, price: 130));
+
+      expect(c.drawings, hasLength(2));
+      expect(c.activeTool, DrawingTool.trendline);
+    });
+  });
 }

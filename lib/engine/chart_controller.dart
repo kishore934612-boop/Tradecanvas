@@ -20,6 +20,7 @@ import 'package:app/domain/entities/candle_data.dart';
 import 'package:app/domain/entities/kline_update.dart';
 import 'package:app/engine/chart_data_source.dart';
 import 'package:app/engine/indicators.dart';
+import 'package:app/models/indicator_style.dart';
 import 'package:app/models/instrument.dart';
 
 /// How many candles to request per page.
@@ -239,6 +240,18 @@ class ChartController extends ChangeNotifier implements ChartDataSource {
     _enabled
       ..clear()
       ..addAll(next);
+    notifyListeners();
+  }
+
+  final Map<IndicatorType, IndicatorStyle> _indicatorStyles = {};
+
+  @override
+  Map<IndicatorType, IndicatorStyle> get indicatorStyles =>
+      Map.unmodifiable(_indicatorStyles);
+
+  @override
+  void setIndicatorStyle(IndicatorType t, IndicatorStyle style) {
+    _indicatorStyles[t] = style;
     notifyListeners();
   }
 

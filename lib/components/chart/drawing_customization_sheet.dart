@@ -1,6 +1,7 @@
 /// Bottom sheet modal for customizing a selected drawing shape.
 library;
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 
 import 'package:app/constants/colors.dart';
@@ -424,33 +425,7 @@ class DrawingCustomizationSheet extends StatelessWidget {
             const SizedBox(height: 16),
           ],
 
-          if (drawing.tool == DrawingTool.brush) ...[
-            Text(
-              'Brush Thickness',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: colors.mutedForeground),
-            ),
-            const SizedBox(height: 6),
-            Row(
-              children: [
-                for (final sw in [2.0, 4.0, 6.0]) ...[
-                  Expanded(
-                    child: FilterChip(
-                      label: Text('${sw.toInt()}px'),
-                      selected: (drawing.strokeWidth - sw).abs() < 0.5,
-                      onSelected: (_) {
-                        Haptics.selection();
-                        controller.updateDrawing(drawing.copyWith(strokeWidth: sw));
-                      },
-                      selectedColor: colors.primary.withValues(alpha: 0.2),
-                      checkmarkColor: colors.primary,
-                    ),
-                  ),
-                  if (sw != 6.0) const SizedBox(width: 8),
-                ],
-              ],
-            ),
-            const SizedBox(height: 16),
-          ],
+
 
           if (drawing.tool == DrawingTool.callout) ...[
             OutlinedButton.icon(
@@ -459,7 +434,7 @@ class DrawingCustomizationSheet extends StatelessWidget {
               onPressed: () async {
                 final newText = await _showTextEditDialog(context, drawing.text ?? '');
                 if (newText != null && newText.isNotEmpty) {
-                  controller.updateText(drawing.id, newText);
+                  unawaited(controller.updateText(drawing.id, newText));
                 }
               },
             ),

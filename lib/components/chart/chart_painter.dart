@@ -16,7 +16,7 @@ import 'package:app/components/chart/chart_transform.dart';
 import 'package:app/constants/colors.dart';
 import 'package:app/domain/entities/candle_data.dart';
 import 'package:app/engine/indicators.dart';
-import 'package:app/engine/session_overlay.dart';
+import 'package:app/models/indicator_style.dart';
 import 'package:app/models/instrument.dart';
 import 'package:app/models/user_profile.dart';
 
@@ -27,6 +27,7 @@ class ChartPaintParams {
   final ChartLayout layout;
   final ChartIndicators indicators;
   final Set<IndicatorType> enabledIndicators;
+  final Map<IndicatorType, IndicatorStyle>? indicatorStyles;
   final ChartStyle style;
   final GridVisibilityPref gridVisibility;
   final GridStylePref gridStyle;
@@ -49,14 +50,12 @@ class ChartPaintParams {
   /// Custom horizontal price line markers.
   final List<double> customPriceLines;
 
-  /// Session overlays to render.
-  final List<SessionRect> sessionRects;
-
   const ChartPaintParams({
     required this.transform,
     required this.layout,
     required this.indicators,
     required this.enabledIndicators,
+    this.indicatorStyles,
     required this.style,
     this.gridVisibility = GridVisibilityPref.show,
     this.gridStyle = GridStylePref.dashed,
@@ -70,7 +69,6 @@ class ChartPaintParams {
     this.crosshairY,
     this.showCrosshairLabels = true,
     this.customPriceLines = const [],
-    this.sessionRects = const [],
   });
 
   List<CandleData> get candles => transform.candles;
@@ -103,7 +101,6 @@ class ChartPainter extends CustomPainter {
     canvas.clipRect(
         Rect.fromLTWH(0, 0, p.layout.plotWidth, p.layout.priceHeight));
 
-    _drawSessions(canvas);
     _drawOverlayIndicators(canvas);
 
     switch (p.style) {
@@ -146,62 +143,6 @@ class ChartPainter extends CustomPainter {
     _drawCustomPriceBadges(canvas);
     if (p.crosshairIndex != null && p.showCrosshairLabels) {
       _drawCrosshairBadges(canvas);
-    }
-  }
-
-
-
-  // ==========================================================
-  // SESSION OVERLAYS
-  // ==========================================================
-
-  void _drawSessions(Canvas canvas) {
-    final rects = p.sessionRects;
-    if (rects.isEmpty) return;
-
-    final t = p.transform;
-
-    for (final sr in rects) {
-      final x1 = t.xForTimestamp(sr.startMs);
-      final x2 = t.xForTimestamp(sr.endMs);
-      final left = math.min(x1, x2);
-      final right = math.max(x1, x2);
-
-      // Skip if entirely off-screen.
-      if (right < 0 || left > p.layout.plotWidth) continue;
-
-      final clampedLeft = left.clamp(0.0, p.layout.plotWidth);
-      final clampedRight = right.clamp(0.0, p.layout.plotWidth);
-
-      // Session background rectangle (full price height).
-      canvas.drawRect(
-        Rect.fromLTRB(clampedLeft, 0, clampedRight, p.layout.priceHeight),
-        Paint()..color = sr.type.color.withValues(alpha: 0.06),
-      );
-
-      // Session name label at top.
-      if (clampedRight - clampedLeft > 30) {
-        _label(
-          canvas,
-          sr.type.label,
-          Offset(clampedLeft + 4, 3),
-          sr.type.color.withValues(alpha: 0.5),
-          8.0,
-        );
-      }
-
-      // Session high/low guide lines.
-      if (sr.high > sr.low) {
-        final hy = t.yForPrice(sr.high);
-        final ly = t.yForPrice(sr.low);
-        final guidePaint = Paint()
-          ..color = sr.type.color.withValues(alpha: 0.3)
-          ..strokeWidth = 0.6;
-        _dashedLine(canvas, Offset(clampedLeft, hy),
-            Offset(clampedRight, hy), guidePaint);
-        _dashedLine(canvas, Offset(clampedLeft, ly),
-            Offset(clampedRight, ly), guidePaint);
-      }
     }
   }
 
@@ -821,24 +762,26 @@ class ChartPainter extends CustomPainter {
   void _drawOverlayIndicators(Canvas canvas) {
     for (final type in p.enabledIndicators) {
       if (!type.isPriceOverlay) continue;
-      final color = Color(type.colorValue);
+      final style = p.indicatorStyles?[type] ?? IndicatorStyle.defaultStyle(type);
+      final color = style.color;
+      final strokeWidth = style.strokeWidth;
 
       if (type == IndicatorType.bollingerBands) {
-        _drawSeries(canvas, p.indicators.bbMiddle, color);
-        _drawSeries(canvas, p.indicators.bbUpper, color.withValues(alpha: 0.7));
-        _drawSeries(canvas, p.indicators.bbLower, color.withValues(alpha: 0.7));
+        _drawSeries(canvas, p.indicators.bbMiddle, color, strokeWidth: strokeWidth);
+        _drawSeries(canvas, p.indicators.bbUpper, color.withValues(alpha: 0.7), strokeWidth: strokeWidth * 0.8);
+        _drawSeries(canvas, p.indicators.bbLower, color.withValues(alpha: 0.7), strokeWidth: strokeWidth * 0.8);
       } else if (type == IndicatorType.superTrend) {
-        _drawSuperTrend(canvas);
+        _drawSuperTrend(canvas, strokeWidth: strokeWidth);
       } else {
         final series = p.indicators.seriesFor(type);
         if (series != null) {
-          _drawSeries(canvas, series, color);
+          _drawSeries(canvas, series, color, strokeWidth: strokeWidth);
         }
       }
     }
   }
 
-  void _drawSuperTrend(Canvas canvas) {
+  void _drawSuperTrend(Canvas canvas, {double strokeWidth = 1.8}) {
     final t = p.transform;
     final first = t.firstVisibleIndex;
     final last = t.lastVisibleIndex;
@@ -861,12 +804,12 @@ class ChartPainter extends CustomPainter {
         Offset(x2, py2),
         Paint()
           ..color = color
-          ..strokeWidth = 1.8,
+          ..strokeWidth = strokeWidth,
       );
     }
   }
 
-  void _drawSeries(Canvas canvas, List<double?> series, Color color) {
+  void _drawSeries(Canvas canvas, List<double?> series, Color color, {double strokeWidth = 1.3}) {
     final t = p.transform;
     final first = t.firstVisibleIndex;
     final last = t.lastVisibleIndex;
@@ -911,7 +854,7 @@ class ChartPainter extends CustomPainter {
 
     _stroke
       ..color = color
-      ..strokeWidth = 1.3
+      ..strokeWidth = strokeWidth
       ..strokeJoin = StrokeJoin.round;
     canvas.drawPath(path, _stroke);
   }
@@ -946,6 +889,9 @@ class ChartPainter extends CustomPainter {
     final posColor = p.colors.positive.withValues(alpha: 0.45);
     final negColor = p.colors.negative.withValues(alpha: 0.45);
 
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(0, p.layout.volumeTop, plotWidth, p.layout.volumeHeight));
+
     for (int i = first; i <= last; i++) {
       final c = t.candles[i];
       final h = c.volume * volHeightFactor;
@@ -958,6 +904,8 @@ class ChartPainter extends CustomPainter {
     }
     _label(canvas, 'Volume', Offset(4, p.layout.volumeTop + 2),
         p.colors.mutedForeground, 8.5);
+
+    canvas.restore();
   }
 
   void _drawMacdPanel(Canvas canvas) {
@@ -986,6 +934,9 @@ class ChartPainter extends CustomPainter {
     final halfSpan = h / 2 - 4;
     double toY(double v) => centre - (v / maxAbs) * halfSpan;
 
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(0, top, p.layout.plotWidth, h));
+
     final linePaint = Paint()
       ..color = p.colors.border.withValues(alpha: 0.4)
       ..strokeWidth = 0.8;
@@ -1007,10 +958,13 @@ class ChartPainter extends CustomPainter {
       );
     }
 
-    _drawPanelLine(canvas, line, const Color(0xFF60A5FA), first, last, toY);
-    _drawPanelLine(canvas, signal, const Color(0xFFF59E0B), first, last, toY);
+    final macdStyle = p.indicatorStyles?[IndicatorType.macd] ?? IndicatorStyle.defaultStyle(IndicatorType.macd);
+    _drawPanelLine(canvas, line, macdStyle.color, first, last, toY, strokeWidth: macdStyle.strokeWidth);
+    _drawPanelLine(canvas, signal, const Color(0xFFF59E0B), first, last, toY, strokeWidth: macdStyle.strokeWidth);
     _label(canvas, 'MACD 12 26 9', Offset(4, top + 2),
         p.colors.mutedForeground, 8.5);
+
+    canvas.restore();
   }
 
   void _drawRsiPanel(Canvas canvas) {
@@ -1024,6 +978,9 @@ class ChartPainter extends CustomPainter {
     final rsi = p.indicators.rsi;
     double toY(double v) => top + h - (v / 100.0) * (h - 4);
 
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(0, top, p.layout.plotWidth, h));
+
     final linePaint = Paint()
       ..color = p.colors.border.withValues(alpha: 0.4)
       ..strokeWidth = 0.8;
@@ -1031,8 +988,11 @@ class ChartPainter extends CustomPainter {
     _dashedLine(canvas, Offset(0, toY(70)), Offset(p.layout.plotWidth, toY(70)), linePaint);
     _dashedLine(canvas, Offset(0, toY(30)), Offset(p.layout.plotWidth, toY(30)), linePaint);
 
-    _drawPanelLine(canvas, rsi, const Color(0xFFA78BFA), first, last, toY);
+    final rsiStyle = p.indicatorStyles?[IndicatorType.rsi] ?? IndicatorStyle.defaultStyle(IndicatorType.rsi);
+    _drawPanelLine(canvas, rsi, rsiStyle.color, first, last, toY, strokeWidth: rsiStyle.strokeWidth);
     _label(canvas, 'RSI (14)', Offset(4, top + 2), p.colors.mutedForeground, 8.5);
+
+    canvas.restore();
   }
 
   void _drawAtrPanel(Canvas canvas) {
@@ -1052,8 +1012,14 @@ class ChartPainter extends CustomPainter {
 
     double toY(double v) => top + h - (v / maxVal) * (h - 6);
 
-    _drawPanelLine(canvas, atr, const Color(0xFFFF7096), first, last, toY);
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(0, top, p.layout.plotWidth, h));
+
+    final atrStyle = p.indicatorStyles?[IndicatorType.atr] ?? IndicatorStyle.defaultStyle(IndicatorType.atr);
+    _drawPanelLine(canvas, atr, atrStyle.color, first, last, toY, strokeWidth: atrStyle.strokeWidth);
     _label(canvas, 'ATR (14)', Offset(4, top + 2), p.colors.mutedForeground, 8.5);
+
+    canvas.restore();
   }
 
   void _drawStochRsiPanel(Canvas canvas) {
@@ -1068,6 +1034,9 @@ class ChartPainter extends CustomPainter {
     final d = p.indicators.stochD;
     double toY(double v) => top + h - (v / 100.0) * (h - 4);
 
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(0, top, p.layout.plotWidth, h));
+
     final linePaint = Paint()
       ..color = p.colors.border.withValues(alpha: 0.4)
       ..strokeWidth = 0.8;
@@ -1075,9 +1044,12 @@ class ChartPainter extends CustomPainter {
     _dashedLine(canvas, Offset(0, toY(80)), Offset(p.layout.plotWidth, toY(80)), linePaint);
     _dashedLine(canvas, Offset(0, toY(20)), Offset(p.layout.plotWidth, toY(20)), linePaint);
 
-    _drawPanelLine(canvas, k, const Color(0xFFC77DFF), first, last, toY);
-    _drawPanelLine(canvas, d, const Color(0xFF38BDF8), first, last, toY);
+    final stochStyle = p.indicatorStyles?[IndicatorType.stochRsi] ?? IndicatorStyle.defaultStyle(IndicatorType.stochRsi);
+    _drawPanelLine(canvas, k, stochStyle.color, first, last, toY, strokeWidth: stochStyle.strokeWidth);
+    _drawPanelLine(canvas, d, const Color(0xFF38BDF8), first, last, toY, strokeWidth: stochStyle.strokeWidth);
     _label(canvas, 'Stoch RSI', Offset(4, top + 2), p.colors.mutedForeground, 8.5);
+
+    canvas.restore();
   }
 
   void _drawPanelLine(
@@ -1086,8 +1058,9 @@ class ChartPainter extends CustomPainter {
     Color color,
     int first,
     int last,
-    double Function(double) toY,
-  ) {
+    double Function(double) toY, {
+    double strokeWidth = 1.1,
+  }) {
     final t = p.transform;
     final path = Path();
     var started = false;
@@ -1110,7 +1083,7 @@ class ChartPainter extends CustomPainter {
 
     _stroke
       ..color = color
-      ..strokeWidth = 1.1;
+      ..strokeWidth = strokeWidth;
     canvas.drawPath(path, _stroke);
   }
 

@@ -218,6 +218,17 @@ class AppColors {
 
   static ThemePalette forBrightness(Brightness brightness) =>
       brightness == Brightness.dark ? dark : light;
+
+  // Trading & Charting Static Color Constants
+  static const Color greenUp = Color(0xFF26A69A);
+  static const Color redDown = Color(0xFFEF5350);
+  static const Color primary = Color(0xFF2962FF);
+  static const Color surface = Color(0xFF1E222D);
+  static const Color surfaceBorder = Color(0xFF2A2E39);
+  static const Color backgroundSecondary = Color(0xFF131722);
+  static const Color textPrimary = Color(0xFFD1D4DC);
+  static const Color textSecondary = Color(0xFF787B86);
+  static const Color textMuted = Color(0xFF5D606B);
 }
 
 /// Wraps a [ThemePalette] so it can live inside [ThemeData.extensions] and be

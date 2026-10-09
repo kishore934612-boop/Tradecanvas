@@ -211,6 +211,7 @@ void main() {
 
       final hitPt = Offset(transform.xForTimestamp(3000), transform.yForPrice(150.0));
       final hit = DrawingGeometry.hitTest(drawing, transform, hitPt, chartWidth: 800.0);
+      expect(hit, isNotNull);
     });
   });
 
@@ -235,27 +236,11 @@ void main() {
       final levels = DrawingGeometry.fibExtensionLevels(drawing, transform);
       expect(levels, isNotEmpty);
       final lev1 = levels.firstWhere((l) => l.level == 1.0);
+      expect(lev1.price, equals(250.0));
     });
   });
 
-  group('Freehand Brush Tool', () {
-    test('create brush stroke, append points dynamically and verify properties', () async {
-      final repo = FakeDrawingRepository();
-      final c = _controller(repo);
 
-      c.setActiveTool(DrawingTool.brush);
-      await c.addAnchor(const DrawingAnchor(timestamp: 1000, price: 100.0));
-      c.appendPointToPending(const DrawingAnchor(timestamp: 1100, price: 105.0));
-      c.appendPointToPending(const DrawingAnchor(timestamp: 1200, price: 110.0));
-      await c.commitPending();
-
-      expect(c.drawings, hasLength(1));
-      final drawing = c.drawings.single;
-      expect(drawing.tool, DrawingTool.brush);
-      expect(drawing.anchors, hasLength(3));
-      expect(drawing.tool.label, 'Freehand Brush');
-    });
-  });
 
   group('Callout Box Tool', () {
     test('create callout box with 2 anchors, text note and shortLabel', () async {

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Backup rules for pre-Android 12 (API < 31).
+   Controls what data is included in Auto Backup.
+-->
+<full-backup-content>
+    <exclude domain="database" path="." />
+    <exclude domain="file" path="flutter_assets" />
+</full-backup-content>

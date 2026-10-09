@@ -15,7 +15,7 @@ if (hasKeyProperties) {
 }
 
 android {
-    namespace = "com.tradeverse.app"
+    namespace = "com.tradecanvas.app"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -25,7 +25,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.tradeverse.app"
+        applicationId = "com.tradecanvas.app"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -45,6 +45,12 @@ android {
 
     buildTypes {
         release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             signingConfig = if (hasKeyProperties) {
                 signingConfigs.getByName("release")
             } else {

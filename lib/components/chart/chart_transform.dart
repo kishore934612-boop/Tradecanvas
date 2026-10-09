@@ -12,6 +12,7 @@ library;
 
 import 'dart:math' as math;
 
+import 'package:app/chart/viewport/viewport_state.dart';
 import 'package:app/domain/entities/candle_data.dart';
 
 class ChartTransform {
@@ -52,6 +53,26 @@ class ChartTransform {
     this.pricePanOffset = 0.0,
     this.rightOffsetFraction = 0.20,
   });
+
+  factory ChartTransform.fromViewportState({
+    required ViewportState viewport,
+    required List<CandleData> candles,
+    required double priceHeight,
+    required int intervalMs,
+  }) {
+    return ChartTransform(
+      candles: candles,
+      candleWidth: viewport.candleWidth,
+      scrollOffset: viewport.scrollOffset,
+      chartWidth: viewport.chartSize.width,
+      priceHeight: priceHeight,
+      minPrice: viewport.minPrice,
+      maxPrice: viewport.maxPrice,
+      intervalMs: intervalMs,
+      pricePanOffset: viewport.pricePanOffset,
+      rightOffsetFraction: viewport.rightOffsetFraction,
+    );
+  }
 
   bool get isEmpty => candles.isEmpty || chartWidth <= 0 || priceHeight <= 0;
 

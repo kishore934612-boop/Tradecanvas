@@ -21,16 +21,22 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import 'package:app/analysis_tools/models/analysis_object.dart';
+import 'package:app/analysis_tools/widgets/analysis_context_menu.dart';
+import 'package:app/chart/viewport/viewport_bounds.dart';
+import 'package:app/chart/viewport/viewport_controller.dart';
 import 'package:app/components/chart/chart_layout.dart';
 import 'package:app/components/chart/chart_painter.dart';
 import 'package:app/components/chart/chart_transform.dart';
-import 'package:app/components/chart/drawing_customization_sheet.dart';
 import 'package:app/components/chart/drawing_geometry.dart';
 import 'package:app/components/chart/drawing_painter.dart';
 import 'package:app/components/chart/floating_measurement_card.dart';
+import 'package:app/components/chart/signal_explanation_sheet.dart';
 import 'package:app/components/chart/smart_candle_sheet.dart';
+import 'package:app/components/chart/smc_explanation_sheet.dart';
+import 'package:app/components/chart/smc_painter.dart';
+import 'package:app/components/chart/strategy_painter.dart';
 import 'package:app/constants/colors.dart';
-import 'package:app/domain/entities/candle_data.dart';
 import 'package:app/engine/candle_analytics.dart';
 import 'package:app/engine/candle_story.dart';
 import 'package:app/engine/chart_data_source.dart';
@@ -38,9 +44,9 @@ import 'package:app/engine/drawing_controller.dart';
 import 'package:app/engine/indicators.dart';
 import 'package:app/engine/magnetic_snap.dart';
 import 'package:app/engine/measurement_calculator.dart';
-import 'package:app/engine/session_overlay.dart';
 import 'package:app/models/drawing.dart';
-import 'package:app/models/instrument.dart';
+import 'package:app/models/smc_type.dart';
+import 'package:app/models/strategy_type.dart';
 import 'package:app/models/user_profile.dart';
 import 'package:app/providers/app_state.dart';
 import 'package:app/utils/haptics.dart';
@@ -59,6 +65,11 @@ class ChartView extends StatefulWidget {
   final ChartDataSource controller;
   final DrawingController drawings;
   final ChartStyle style;
+  final List<StrategySignal> strategySignals;
+  final StrategySettings strategySettings;
+  final List<SmcStructure> smcStructures;
+  final SmcSettings smcSettings;
+  final ValueChanged<bool>? onScrolledAwayChanged;
 
   /// Called when the crosshair moves, so a parent can show an OHLC readout.
   final ValueChanged<int?>? onCrosshairIndex;
@@ -73,7 +84,12 @@ class ChartView extends StatefulWidget {
     super.key,
     required this.controller,
     required this.drawings,
-    this.style = ChartStyle.candles,
+    required this.style,
+    this.strategySignals = const [],
+    this.strategySettings = const StrategySettings(),
+    this.smcStructures = const [],
+    this.smcSettings = const SmcSettings(),
+    this.onScrolledAwayChanged,
     this.onCrosshairIndex,
     this.snapshotKey,
   });
@@ -85,10 +101,7 @@ class ChartView extends StatefulWidget {
 typedef ChartViewRefState = _ChartViewState;
 
 class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
-  double _candleWidth = kDefaultCandleWidth;
-  double _scrollOffset = 0.0;
-  double _priceScaleRatio = 1.0;
-  double _pricePanOffset = 0.0;
+  late final ViewportController _viewportController;
 
   int? _crosshairIndex;
   double? _crosshairY;
@@ -103,11 +116,10 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
   int? _lastHapticCandleIndex;
 
   _DragMode _mode = _DragMode.none;
-  double _scaleStartWidth = kDefaultCandleWidth;
-  double _scaleStartPriceRatio = 1.0;
   Offset? _lastFocalPoint;
   Offset? _drawTouchStartPoint;
   bool _drawTouchDragged = false;
+  bool _justStartedPending = false;
   String? _activeDrawingId;
   int? _activeHandle;
 
@@ -116,21 +128,12 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
 
   Size _size = Size.zero;
 
-  /// Session overlay configuration, shared with the toolbar.
-  late final SessionOverlayConfig _sessionConfig;
-
-  late final AnimationController _inertiaController;
-  Animation<double>? _inertiaAnimation;
-  double _lastInertiaVal = 0.0;
-  AnimationController? _resetAnimController;
-
   @override
   void initState() {
     super.initState();
-    _sessionConfig = context.read<AppState>().profile.sessionConfig;
+    _viewportController = ViewportController();
+    _viewportController.addListener(_onViewportChanged);
     widget.controller.addListener(_onData);
-    _inertiaController = AnimationController(vsync: this);
-    _inertiaController.addListener(_onInertiaTick);
   }
 
   @override
@@ -139,67 +142,37 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
     if (old.controller != widget.controller) {
       old.controller.removeListener(_onData);
       widget.controller.addListener(_onData);
-      _resetViewport();
+      _viewportController.resetViewport(this);
     }
   }
 
   @override
   void dispose() {
-    _inertiaController.dispose();
-    _resetAnimController?.dispose();
+    _viewportController.removeListener(_onViewportChanged);
+    _viewportController.dispose();
     widget.controller.removeListener(_onData);
     super.dispose();
   }
 
-  void _onInertiaTick() {
-    if (_inertiaAnimation == null || _size == Size.zero) return;
-    final delta = _inertiaAnimation!.value - _lastInertiaVal;
-    _lastInertiaVal = _inertiaAnimation!.value;
-    if (delta.abs() < 0.01) return;
-
-    final layout = _layout(_size);
-    final t = _transform(layout);
-    setState(() {
-      _scrollOffset += delta;
-      _clampScroll(t);
-    });
-    _maybeLoadHistory(t);
-  }
-
-  void _startInertia(double velocityX) {
-    _inertiaController.stop();
-    _lastInertiaVal = 0.0;
-
-    final distance = (velocityX * 0.35).clamp(-2500.0, 2500.0);
-    final durationMs = (distance.abs() * 0.25).clamp(180.0, 500.0).toInt();
-
-    _inertiaAnimation = Tween<double>(begin: 0.0, end: distance).animate(
-      CurvedAnimation(parent: _inertiaController, curve: Curves.decelerate),
-    );
-
-    _inertiaController.duration = Duration(milliseconds: durationMs);
-    _inertiaController.forward(from: 0.0);
+  void _onViewportChanged() {
+    if (!mounted) return;
+    widget.onScrolledAwayChanged?.call(_viewportController.isScrolledAway);
+    setState(() {});
   }
 
   void _onData() {
     if (!mounted) return;
     _historyRequested = false;
+    _viewportController.onNewCandleArrived();
     setState(() {});
   }
 
-  void _resetViewport() {
-    _candleWidth = kDefaultCandleWidth;
-    _scrollOffset = 0.0;
+  void resetView() {
+    _viewportController.resetViewport(this);
     _crosshairIndex = null;
     _crosshairY = null;
+    _crosshairPixelX = null;
     widget.onCrosshairIndex?.call(null);
-  }
-
-  void resetView() {
-    setState(() {
-      _resetViewport();
-      _pricePanOffset = 0.0;
-    });
   }
 
   // ==========================================================
@@ -228,8 +201,8 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
     if (candles.isEmpty) {
       return ChartTransform(
         candles: const [],
-        candleWidth: _candleWidth,
-        scrollOffset: _scrollOffset,
+        candleWidth: _viewportController.candleWidth,
+        scrollOffset: _viewportController.scrollOffset,
         chartWidth: layout.plotWidth,
         priceHeight: layout.priceHeight,
         minPrice: 0,
@@ -239,12 +212,10 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
       );
     }
 
-    // Build a provisional transform to learn which candles are visible, then
-    // autoscale the price axis to just those.
     final probe = ChartTransform(
       candles: candles,
-      candleWidth: _candleWidth,
-      scrollOffset: _scrollOffset,
+      candleWidth: _viewportController.candleWidth,
+      scrollOffset: _viewportController.scrollOffset,
       chartWidth: layout.plotWidth,
       priceHeight: layout.priceHeight,
       minPrice: 0,
@@ -256,30 +227,33 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
     final range = profile.autoScale
         ? c.priceRange(probe.firstVisibleIndex, probe.lastVisibleIndex)
         : c.priceRange(0, candles.length - 1);
-    final pad = (range.max - range.min) * kPricePadFraction;
+    final pad = (range.max - range.min) * ViewportBounds.kDefaultPricePadFraction;
 
     final midPrice = (range.min + range.max) / 2.0;
     final halfSpan =
         (math.max(1e-6, (range.max - range.min) / 2.0) + pad) *
-        _priceScaleRatio;
+        _viewportController.priceScaleRatio;
+
+    final minP = midPrice - halfSpan;
+    final maxP = midPrice + halfSpan;
+
+    _viewportController.updateLayout(
+      size: Size(layout.plotWidth, layout.priceHeight),
+      candleCount: candles.length,
+      minPrice: minP,
+      maxPrice: maxP,
+    );
 
     return probe.copyWith(
-      minPrice: midPrice - halfSpan,
-      maxPrice: midPrice + halfSpan,
-      pricePanOffset: _pricePanOffset,
+      minPrice: minP,
+      maxPrice: maxP,
+      pricePanOffset: _viewportController.pricePanOffset,
     );
   }
 
   // ==========================================================
   // VIEWPORT
   // ==========================================================
-
-  void _clampScroll(ChartTransform t) {
-    _scrollOffset = _scrollOffset.clamp(
-      t.minScrollOffset,
-      math.max(0.0, t.maxScrollOffset),
-    );
-  }
 
   void _maybeLoadHistory(ChartTransform t) {
     if (_historyRequested) return;
@@ -288,10 +262,6 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
     if (!t.isNearLeftEdge()) return;
 
     _historyRequested = true;
-    // No scroll compensation needed: xForIndex positions every candle by its
-    // distance from the newest one, so prepending older candles at the front
-    // of the list does not move any already-visible candle. Adjusting
-    // scrollOffset here would introduce a jump, not prevent one.
     widget.controller.loadMoreHistory();
   }
 
@@ -300,11 +270,6 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
   // ==========================================================
 
   void _onScaleStart(ScaleStartDetails d) {
-    _inertiaController.stop();
-    _scaleStartWidth = _candleWidth;
-    _scaleStartPriceRatio = _priceScaleRatio;
-    _lastFocalPoint = d.localFocalPoint;
-
     final layout = _layout(_size);
 
     // Price bar scale gesture (dragging vertically on right price axis)
@@ -318,16 +283,19 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
 
     final t = _transform(layout);
 
-    // GESTURE PRIORITY #1: DRAWING MODE (Disables Chart Pan, Inertial Drag & Zoom)
+    // GESTURE PRIORITY #1: DRAWING MODE
     if (widget.drawings.isDrawing) {
       _mode = _DragMode.placing;
       _drawTouchStartPoint = d.localFocalPoint;
+      _lastFocalPoint = d.localFocalPoint;
       _drawTouchDragged = false;
 
       final pending = widget.drawings.pending;
       if (pending == null) {
+        _justStartedPending = true;
         _placeAnchor(d.localFocalPoint, t, isFirst: true);
       } else {
+        _justStartedPending = false;
         widget.drawings.updatePendingLastAnchor(
           _snappedAnchor(d.localFocalPoint, t),
         );
@@ -336,17 +304,11 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
     }
 
     if (d.pointerCount >= 2) {
-      _mode = _DragMode.pan; // zoom is handled in update
+      _mode = _DragMode.pan;
       return;
     }
 
     // GESTURE PRIORITY #2: DRAWING EDITING
-    //
-    // Hit-test every drawing (not just whichever one happens to already be
-    // selected), so any drawn tool can be grabbed and dragged — by its body
-    // or a handle — in a single gesture. Touching it here both selects it
-    // and starts the move; a separate prior tap-to-select is no longer
-    // required.
     final hit = DrawingGeometry.topmostAt(
       widget.drawings.drawings,
       t,
@@ -385,51 +347,32 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
     final layout = _layout(_size);
     final t = _transform(layout);
 
-    // Pinch zoom, anchored so the candle under the fingers stays put.
+    // Pinch zoom, anchored cleanly under focalPoint
     if (d.pointerCount >= 2) {
       if (widget.drawings.isDrawing ||
           context.read<AppState>().profile.chartLocked) {
         return;
-      } // Disable zoom while drawing or locked
-      final anchorIndex = t.indexForX(d.localFocalPoint.dx);
-      final nextWidth = (_scaleStartWidth * d.scale).clamp(
-        kMinCandleWidth,
-        kMaxCandleWidth,
+      }
+      _viewportController.scaleFocal(
+        scaleFactor: d.scale,
+        focalPoint: d.localFocalPoint,
       );
-      final focalX = d.localFocalPoint.dx;
-      final newestIndex = widget.controller.candles.length - 1;
-
-      setState(() {
-        _candleWidth = nextWidth;
-        final rightAnchor = layout.plotWidth - t.rightOffsetPx - nextWidth / 2;
-        final fromNewest = newestIndex - anchorIndex;
-        _scrollOffset = focalX - rightAnchor + fromNewest * nextWidth;
-        _clampScroll(
-          t.copyWith(candleWidth: nextWidth, scrollOffset: _scrollOffset),
-        );
-      });
       _maybeLoadHistory(_transform(layout));
       return;
     }
 
     switch (_mode) {
       case _DragMode.placing:
+        _lastFocalPoint = d.localFocalPoint;
         if (_drawTouchStartPoint != null) {
           final dist = (d.localFocalPoint - _drawTouchStartPoint!).distance;
           if (dist > 8.0) {
             _drawTouchDragged = true;
           }
         }
-        if (widget.drawings.activeTool == DrawingTool.brush) {
-          widget.drawings.appendPointToPending(
-            _snappedAnchor(d.localFocalPoint, t),
-          );
-        } else {
-          // Continuous live update — preview follows finger in real-time!
-          widget.drawings.updatePendingLastAnchor(
-            _snappedAnchor(d.localFocalPoint, t),
-          );
-        }
+        widget.drawings.updatePendingLastAnchor(
+          _snappedAnchor(d.localFocalPoint, t),
+        );
         break;
 
       case _DragMode.moveHandle:
@@ -460,17 +403,11 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
         break;
 
       case _DragMode.priceScale:
-        setState(() {
-          if (d.scale != 1.0 && d.pointerCount >= 2) {
-            _priceScaleRatio = (_scaleStartPriceRatio / d.scale).clamp(
-              0.05,
-              20.0,
-            );
-          } else if (d.focalPointDelta.dy != 0) {
-            final factor = 1.0 + (d.focalPointDelta.dy / 100.0);
-            _priceScaleRatio = (_priceScaleRatio * factor).clamp(0.05, 20.0);
-          }
-        });
+        if (d.scale != 1.0 && d.pointerCount >= 2) {
+          _viewportController.scalePrice(1.0 / d.scale);
+        } else if (d.focalPointDelta.dy != 0) {
+          _viewportController.panPrice(d.focalPointDelta.dy);
+        }
         break;
 
       case _DragMode.pan:
@@ -478,14 +415,11 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
         if (widget.drawings.isDrawing ||
             context.read<AppState>().profile.chartLocked) {
           break;
-        } // Disable pan while drawing or locked!
-        setState(() {
-          _scrollOffset += d.focalPointDelta.dx;
-          if (d.pointerCount >= 2 || _pricePanOffset != 0.0) {
-            _pricePanOffset += d.focalPointDelta.dy;
-          }
-          _clampScroll(t);
-        });
+        }
+        _viewportController.pan(d.focalPointDelta.dx);
+        if (d.pointerCount >= 2 || _viewportController.pricePanOffset != 0.0) {
+          _viewportController.panPrice(d.focalPointDelta.dy);
+        }
         _maybeLoadHistory(t);
         break;
     }
@@ -498,9 +432,7 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
     if (_mode == _DragMode.placing) {
       final pending = widget.drawings.pending;
       if (pending != null && pending.anchors.isNotEmpty) {
-        if (pending.tool == DrawingTool.brush) {
-          widget.drawings.commitPending();
-        } else if (_drawTouchDragged && _lastFocalPoint != null) {
+        if (_drawTouchDragged && _lastFocalPoint != null) {
           _confirmAnchorB(_lastFocalPoint!, t);
         }
       }
@@ -517,7 +449,7 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
         velocityX.abs() > 120 &&
         !widget.drawings.isDrawing &&
         !context.read<AppState>().profile.chartLocked) {
-      _startInertia(velocityX);
+      _viewportController.startFling(velocityX, this);
     }
 
     _mode = _DragMode.none;
@@ -579,19 +511,6 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
     );
   }
 
-  void _openCustomizationSheet(Drawing drawing) {
-    Haptics.light();
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (_) => DrawingCustomizationSheet(
-        drawing: drawing,
-        controller: widget.drawings,
-      ),
-    );
-  }
-
   bool _isTapOnCandleBody(Offset pos, ChartTransform t) {
     final candles = widget.controller.candles;
     if (candles.isEmpty) return false;
@@ -626,6 +545,10 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
 
     // Placing shape by tapping.
     if (widget.drawings.isDrawing) {
+      if (_justStartedPending) {
+        _justStartedPending = false;
+        return;
+      }
       final pending = widget.drawings.pending;
       if (pending == null) {
         _placeAnchor(d.localPosition, t, isFirst: true);
@@ -643,12 +566,58 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
       chartWidth: layout.plotWidth,
     );
 
+    // Strategy signal marker tap hit test
+    if (hit == null && widget.strategySignals.isNotEmpty) {
+      final signalHit = StrategyPainter.hitTestSignal(
+        point: d.localPosition,
+        signals: widget.strategySignals,
+        transform: t,
+        plotWidth: layout.plotWidth,
+        settings: widget.strategySettings,
+      );
+      if (signalHit != null) {
+        Haptics.selection();
+        showModalBottomSheet<void>(
+          context: context,
+          backgroundColor: Colors.transparent,
+          isScrollControlled: true,
+          builder: (_) => SignalExplanationSheet(signal: signalHit),
+        );
+        return;
+      }
+    }
+
+    // SMC structure overlay tap hit test
+    if (hit == null && widget.smcStructures.isNotEmpty) {
+      final smcHit = SmcPainter.hitTestStructure(
+        point: d.localPosition,
+        structures: widget.smcStructures,
+        transform: t,
+        plotWidth: layout.plotWidth,
+      );
+      if (smcHit != null) {
+        Haptics.selection();
+        showModalBottomSheet<void>(
+          context: context,
+          backgroundColor: Colors.transparent,
+          isScrollControlled: true,
+          builder: (_) => SmcExplanationSheet(structure: smcHit),
+        );
+        return;
+      }
+    }
+
     if (hit != null) {
       Haptics.selection();
-      if (widget.drawings.selectedId == hit.id) {
-        // Just keep selected, no customization sheet
+      if (widget.drawings.selectedId == hit.id && hit.isAnalysisObject) {
+        final obj = AnalysisObject.fromDrawing(hit);
+        AnalysisContextMenu.show(context, object: obj, controller: widget.drawings);
       } else {
         widget.drawings.select(hit.id);
+        if (hit.isAnalysisObject) {
+          final obj = AnalysisObject.fromDrawing(hit);
+          AnalysisContextMenu.show(context, object: obj, controller: widget.drawings);
+        }
       }
     } else {
       if (widget.drawings.selectedId != null) Haptics.light();
@@ -843,39 +812,7 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
               onPointerSignal: (signal) {
                 if (context.read<AppState>().profile.chartLocked) return;
                 if (signal is PointerScrollEvent) {
-                  final layout = _layout(_size);
-                  final t = _transform(layout);
-
-                  if (signal.scrollDelta.dy != 0) {
-                    final zoomFactor = signal.scrollDelta.dy < 0 ? 1.12 : 0.88;
-                    final focalX = signal.localPosition.dx;
-                    final anchorIndex = t.indexForX(focalX);
-                    final nextWidth = (_candleWidth * zoomFactor).clamp(
-                      kMinCandleWidth,
-                      kMaxCandleWidth,
-                    );
-                    final newestIndex = widget.controller.candles.length - 1;
-
-                    setState(() {
-                      _candleWidth = nextWidth;
-                      final rightAnchor =
-                          layout.plotWidth - t.rightOffsetPx - nextWidth / 2;
-                      final fromNewest = newestIndex - anchorIndex;
-                      _scrollOffset =
-                          focalX - rightAnchor + fromNewest * nextWidth;
-                      _clampScroll(
-                        t.copyWith(
-                          candleWidth: nextWidth,
-                          scrollOffset: _scrollOffset,
-                        ),
-                      );
-                    });
-                  } else if (signal.scrollDelta.dx != 0) {
-                    setState(() {
-                      _scrollOffset -= signal.scrollDelta.dx;
-                      _clampScroll(t);
-                    });
-                  }
+                  _viewportController.handlePointerScroll(signal, signal.localPosition);
                 }
               },
               onPointerHover: (e) {
@@ -905,10 +842,10 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
                 onTapUp: _onTapUp,
                 onDoubleTapDown: (d) {
                   if (d.localPosition.dx >= layout.plotWidth) {
-                    setState(() {
-                      _priceScaleRatio = 1.0;
-                      _pricePanOffset = 0.0;
-                    });
+                    _viewportController.scalePrice(1.0);
+                    Haptics.light();
+                  } else {
+                    _viewportController.doubleTapZoom(d.localPosition, this);
                     Haptics.light();
                   }
                 },
@@ -960,6 +897,7 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
                                       indicators: controller.indicators,
                                       enabledIndicators:
                                           controller.enabledIndicators,
+                                      indicatorStyles: controller.indicatorStyles,
                                       style: _getChartStyle(
                                         context
                                             .watch<AppState>()
@@ -1003,15 +941,6 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
                                           .watch<AppState>()
                                           .profile
                                           .customPriceLines,
-                                      sessionRects: _sessionConfig.masterEnabled
-                                          ? _sessionConfig.compute(
-                                              candles: controller.candles,
-                                              firstVisibleIndex:
-                                                  t.firstVisibleIndex,
-                                              lastVisibleIndex:
-                                                  t.lastVisibleIndex,
-                                            )
-                                          : const [],
                                     ),
                                   ),
                                   size: size,
@@ -1039,6 +968,40 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
                                 ),
                               ),
                             ),
+
+                             // Educational Strategy Overlay layer
+                            if (widget.strategySignals.isNotEmpty)
+                              Positioned.fill(
+                                child: RepaintBoundary(
+                                  child: CustomPaint(
+                                    painter: StrategyPainter(
+                                      transform: t,
+                                      signals: widget.strategySignals,
+                                      settings: widget.strategySettings,
+                                      colors: colors,
+                                      plotWidth: layout.plotWidth,
+                                    ),
+                                    size: size,
+                                  ),
+                                ),
+                              ),
+
+                            // Smart Money Concepts Overlay layer
+                            if (widget.smcStructures.isNotEmpty)
+                              Positioned.fill(
+                                child: RepaintBoundary(
+                                  child: CustomPaint(
+                                    painter: SmcPainter(
+                                      transform: t,
+                                      structures: widget.smcStructures,
+                                      settings: widget.smcSettings,
+                                      colors: colors,
+                                      plotWidth: layout.plotWidth,
+                                    ),
+                                    size: size,
+                                  ),
+                                ),
+                              ),
                           ],
                         ),
                       ),
@@ -1051,34 +1014,25 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
                         child: _Chip(label: 'Loading history', colors: colors),
                       ),
 
-                    if (_crosshairIndex != null)
-                      Positioned(
-                        left: 8,
-                        top: 8,
-                        child: _OhlcReadout(
-                          candle:
-                              controller.candles[_crosshairIndex!.clamp(
-                                0,
-                                controller.candles.length - 1,
-                              )],
-                          instrument: controller.instrument,
-                          colors: colors,
-                          onTap: () {
-                            final idx = _crosshairIndex;
-                            if (idx != null &&
-                                idx >= 0 &&
-                                idx < controller.candles.length) {
-                              _showCandleSheet(idx);
-                            }
-                          },
-                        ),
-                      ),
                     // Floating measurement card.
                     if (_shouldShowMeasurementCard())
                       Positioned(
                         left: 8,
                         bottom: 8,
                         child: _buildMeasurementCard(controller),
+                      ),
+
+                    // Floating "Go to Live" return button when scrolled away.
+                    if (_viewportController.isScrolledAway && widget.controller.candles.isNotEmpty)
+                      Positioned(
+                        right: 14,
+                        bottom: 64,
+                        child: _FloatingGoToLiveButton(
+                          onPressed: () {
+                            Haptics.light();
+                            _viewportController.goToLive(this);
+                          },
+                        ),
                       ),
 
                     // Floating top toolbar for drawn tool customization.
@@ -1326,17 +1280,6 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
     );
   }
 
-  /// Expose session config for the toolbar to toggle.
-  SessionOverlayConfig get sessionConfig => _sessionConfig;
-
-  /// Toggle session overlay master switch.
-  void toggleSessions() {
-    setState(() {
-      _sessionConfig.masterEnabled = !_sessionConfig.masterEnabled;
-    });
-    context.read<AppState>().setSessionConfig(_sessionConfig);
-  }
-
   ChartStyle _getChartStyle(ChartTypePref pref) {
     switch (pref) {
       case ChartTypePref.candles:
@@ -1356,84 +1299,6 @@ class _ChartViewState extends State<ChartView> with TickerProviderStateMixin {
 // ============================================================
 // SMALL UI PIECES
 // ============================================================
-
-class _OhlcReadout extends StatelessWidget {
-  final CandleData candle;
-  final Instrument instrument;
-  final ThemePalette colors;
-  final VoidCallback? onTap;
-
-  const _OhlcReadout({
-    required this.candle,
-    required this.instrument,
-    required this.colors,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final valueColor = candle.isBullish ? colors.positive : colors.negative;
-
-    Widget cell(String label, double value) => Padding(
-      padding: const EdgeInsets.only(right: 8),
-      child: Text.rich(
-        TextSpan(
-          children: [
-            TextSpan(
-              text: '$label ',
-              style: TextStyle(
-                color: colors.mutedForeground,
-                fontSize: 9.5,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            TextSpan(
-              text: instrument.formatPrice(value),
-              style: TextStyle(
-                color: valueColor,
-                fontSize: 9.5,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-        decoration: BoxDecoration(
-          color: colors.card.withValues(alpha: 0.92),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: colors.border),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            cell('O', candle.open),
-            cell('H', candle.high),
-            cell('L', candle.low),
-            cell('C', candle.close),
-            const SizedBox(width: 4),
-            Icon(Icons.analytics_outlined, size: 13, color: colors.primary),
-            const SizedBox(width: 2),
-            Text(
-              'Stats',
-              style: TextStyle(
-                fontSize: 9,
-                fontWeight: FontWeight.bold,
-                color: colors.primary,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
 class _Chip extends StatelessWidget {
   final String label;
@@ -1509,6 +1374,57 @@ class _ErrorState extends StatelessWidget {
               label: const Text('Retry'),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FloatingGoToLiveButton extends StatelessWidget {
+  final VoidCallback onPressed;
+
+  const _FloatingGoToLiveButton({required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          decoration: BoxDecoration(
+            color: colors.card.withValues(alpha: 0.92),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: colors.primary.withValues(alpha: 0.5),
+              width: 1,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.25),
+                blurRadius: 8,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.arrow_forward_rounded, size: 14, color: colors.primary),
+              const SizedBox(width: 5),
+              Text(
+                'Go to Live',
+                style: TextStyle(
+                  color: colors.foreground,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

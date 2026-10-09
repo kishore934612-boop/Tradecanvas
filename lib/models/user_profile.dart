@@ -2,10 +2,6 @@
 ///
 /// Charting preferences only. The previous trading-onboarding fields
 /// (experience, style, starting capital, journal prompts) are gone.
-library;
-
-import 'package:app/engine/session_overlay.dart';
-
 /// Grid visibility preference.
 enum GridVisibilityPref { show, hide }
 
@@ -192,9 +188,6 @@ class UserProfile {
   /// Right offset (empty space / future margin) as a percentage of chart width (e.g. 20.0 for 20%)
   double rightOffsetPercent;
 
-  /// Market session overlay configuration (persisted across app restarts).
-  SessionOverlayConfig sessionConfig;
-
   /// Crosshair behavior mode: free, magnet (snap to OHLC), locked (snap to close).
   CrosshairMode crosshairMode;
 
@@ -229,7 +222,6 @@ class UserProfile {
     this.rightOffsetPercent = 20.0,
     Set<String>? defaultIndicators,
     List<String>? favoriteDrawingTools,
-    SessionOverlayConfig? sessionConfig,
     this.crosshairMode = CrosshairMode.free,
     this.crosshairShowLabels = true,
     this.autoScale = true,
@@ -239,8 +231,7 @@ class UserProfile {
         defaultIndicators = defaultIndicators ?? {'volume'},
         favoriteDrawingTools =
             favoriteDrawingTools ?? ['trendline', 'horizontalLine', 'rectangle'],
-        customPriceLines = customPriceLines ?? [],
-        sessionConfig = sessionConfig ?? SessionOverlayConfig();
+        customPriceLines = customPriceLines ?? [];
 
   Map<String, dynamic> toJson() => {
         'onboarded': onboarded,
@@ -258,7 +249,6 @@ class UserProfile {
         'rightOffsetPercent': rightOffsetPercent,
         'defaultIndicators': defaultIndicators.toList(),
         'favoriteDrawingTools': favoriteDrawingTools,
-        'sessionConfig': sessionConfig.toJson(),
         'crosshairMode': crosshairMode.name,
         'crosshairShowLabels': crosshairShowLabels,
         'autoScale': autoScale,
@@ -292,8 +282,6 @@ class UserProfile {
         favoriteDrawingTools: j['favoriteDrawingTools'] != null
             ? List<String>.from(j['favoriteDrawingTools'] as List)
             : ['trendline', 'horizontalLine', 'rectangle'],
-        sessionConfig: SessionOverlayConfig.fromJson(
-            j['sessionConfig'] as Map<String, dynamic>?),
         crosshairMode:
             CrosshairModeX.fromId(j['crosshairMode'] as String?),
         crosshairShowLabels: j['crosshairShowLabels'] as bool? ?? true,

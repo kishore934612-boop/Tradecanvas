@@ -25,8 +25,9 @@ const Map<DrawingTool, IconData> kDrawingToolIcons = {
   DrawingTool.measurement: Icons.straighten_rounded,
   DrawingTool.triangle: Icons.change_history_rounded,
   DrawingTool.fibExtension: Icons.timeline_rounded,
-  DrawingTool.brush: Icons.brush_rounded,
   DrawingTool.callout: Icons.mark_chat_read_rounded,
+  DrawingTool.longPosition: Icons.trending_up_rounded,
+  DrawingTool.shortPosition: Icons.trending_down_rounded,
 };
 
 class QuickActionToolbar extends StatelessWidget {

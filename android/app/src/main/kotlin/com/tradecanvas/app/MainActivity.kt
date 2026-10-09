@@ -1,4 +1,4 @@
-package com.tradeverse.app
+package com.tradecanvas.app
 
 import io.flutter.embedding.android.FlutterActivity
 

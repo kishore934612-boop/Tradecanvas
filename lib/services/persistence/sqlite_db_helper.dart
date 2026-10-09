@@ -14,8 +14,8 @@ import 'package:app/core/logging/logger.dart';
 class SqliteDbHelper {
   static const String _dbName = 'charty_local.db';
 
-  /// v1 = TradeVerse (12 tables). v2 = Charty schema. v3 = drawings text column.
-  static const int _dbVersion = 3;
+  /// v1 = TradeVerse (12 tables). v2 = Charty schema. v3 = drawings text column. v4 = alerts & alert_history. v5 = V2 Alert System Upgrade.
+  static const int _dbVersion = 5;
 
   /// Tables removed in v2 because the features no longer exist.
   static const List<String> _legacyTables = [

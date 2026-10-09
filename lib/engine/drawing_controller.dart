@@ -13,11 +13,16 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'package:app/analysis_tools/engine/analysis_tool_factory.dart';
+import 'package:app/analysis_tools/models/analysis_type.dart';
+import 'package:app/chart/history/history_manager.dart';
 import 'package:app/core/logging/logger.dart';
 import 'package:app/domain/repositories/drawing_repository.dart';
 import 'package:app/engine/drawing_history.dart';
+import 'package:app/engine/indicators.dart';
 import 'package:app/engine/magnetic_snap.dart';
 import 'package:app/models/drawing.dart';
+import 'package:app/models/indicator_style.dart';
 
 /// Default palette offered in the drawing toolbar.
 const List<int> kDrawingColors = [
@@ -44,6 +49,7 @@ class DrawingController extends ChangeNotifier {
   String _symbol;
 
   DrawingTool? _activeTool;
+  AnalysisType? _activeAnalysisTool;
   Drawing? _pending;
   String? _selectedId;
 
@@ -59,6 +65,9 @@ class DrawingController extends ChangeNotifier {
   bool _isLoading = false;
 
   MagneticMode _magneticMode = MagneticMode.off;
+  bool _continuousDrawingMode = false;
+
+  late final HistoryManager _historyManager;
 
   DrawingController({
     required DrawingRepository repository,
@@ -66,7 +75,11 @@ class DrawingController extends ChangeNotifier {
     required String symbol,
   })  : _repository = repository,
         _logger = logger,
-        _symbol = symbol;
+        _symbol = symbol {
+    _historyManager = HistoryManager(maxCapacity: 100);
+  }
+
+  HistoryManager get historyManager => _historyManager;
 
   // ==========================================================
   // STATE
@@ -83,13 +96,39 @@ class DrawingController extends ChangeNotifier {
   Drawing? get pending => _pending;
 
   DrawingTool? get activeTool => _activeTool;
-  bool get isDrawing => _activeTool != null;
+  AnalysisType? get activeAnalysisTool => _activeAnalysisTool;
+  bool get isDrawing => _activeTool != null || _activeAnalysisTool != null;
   String? get selectedId => _selectedId;
   int get colorValue => _colorValue;
   double get strokeWidth => _strokeWidth;
   bool get hasDrawings => drawings.isNotEmpty;
-
   MagneticMode get magneticMode => _magneticMode;
+  bool get isContinuousDrawing => _continuousDrawingMode;
+
+  void setContinuousDrawing(bool enabled) {
+    if (_continuousDrawingMode == enabled) return;
+    _continuousDrawingMode = enabled;
+    notifyListeners();
+  }
+
+  void toggleContinuousDrawing() {
+    _continuousDrawingMode = !_continuousDrawingMode;
+    notifyListeners();
+  }
+
+  final Map<IndicatorType, IndicatorStyle> _indicatorStyles = {};
+
+  IndicatorStyle indicatorStyleFor(IndicatorType type) {
+    return _indicatorStyles[type] ?? IndicatorStyle.defaultStyle(type);
+  }
+
+  Map<IndicatorType, IndicatorStyle> get indicatorStyles =>
+      Map.unmodifiable(_indicatorStyles);
+
+  void setIndicatorStyle(IndicatorType type, IndicatorStyle style) {
+    _indicatorStyles[type] = style;
+    notifyListeners();
+  }
 
   DrawingHistory get _history =>
       _historyBySymbol.putIfAbsent(_symbol, () => DrawingHistory());
@@ -144,11 +183,25 @@ class DrawingController extends ChangeNotifier {
   // ==========================================================
 
   void setActiveTool(DrawingTool? tool) {
-    if (_activeTool == tool) {
+    if (_activeTool == tool && _activeAnalysisTool == null) {
       // Tapping the active tool again returns to pan/select mode.
       _activeTool = null;
     } else {
       _activeTool = tool;
+      _activeAnalysisTool = null;
+      _selectedId = null;
+    }
+    cancelPending();
+    notifyListeners();
+  }
+
+  void setActiveAnalysisTool(AnalysisType? type) {
+    if (_activeAnalysisTool == type) {
+      _activeAnalysisTool = null;
+      _activeTool = null;
+    } else {
+      _activeAnalysisTool = type;
+      _activeTool = type?.underlyingTool;
       _selectedId = null;
     }
     cancelPending();
@@ -206,28 +259,39 @@ class DrawingController extends ChangeNotifier {
   /// the tool's anchor count is satisfied.
   Future<void> addAnchor(DrawingAnchor anchor, {String? text}) async {
     final tool = _activeTool;
-    if (tool == null) return;
+    final analysisType = _activeAnalysisTool;
+    if (tool == null && analysisType == null) return;
 
     final current = _pending;
 
     if (current == null) {
-      _pending = Drawing(
-        id: _newId(),
-        tool: tool,
-        symbol: _symbol,
-        anchors: [anchor],
-        colorValue: _colorValue,
-        strokeWidth: _strokeWidth,
-        text: text,
-        isComplete: false,
-        createdAt: DateTime.now().millisecondsSinceEpoch,
-      );
+      if (analysisType != null) {
+        _pending = AnalysisToolFactory.createDrawing(
+          type: analysisType,
+          symbol: _symbol,
+          anchors: [anchor],
+          customLabel: text,
+        ).copyWith(isComplete: false);
+      } else if (tool != null) {
+        _pending = Drawing(
+          id: _newId(),
+          tool: tool,
+          symbol: _symbol,
+          anchors: [anchor],
+          colorValue: _colorValue,
+          strokeWidth: _strokeWidth,
+          text: text,
+          isComplete: false,
+          createdAt: DateTime.now().millisecondsSinceEpoch,
+        );
+      }
     } else {
       final existing = List<DrawingAnchor>.from(current.anchors);
-      if (existing.length < tool.anchorCount) {
+      final reqAnchors = analysisType?.anchorCount ?? tool?.anchorCount ?? 2;
+      if (existing.length < reqAnchors) {
         existing.add(anchor);
       } else {
-        existing[tool.anchorCount - 1] = anchor;
+        existing[reqAnchors - 1] = anchor;
       }
       _pending = current.copyWith(
         anchors: existing,
@@ -235,7 +299,8 @@ class DrawingController extends ChangeNotifier {
       );
     }
 
-    if (tool != DrawingTool.brush && _pending!.anchors.length >= tool.anchorCount) {
+    final reqAnchors = analysisType?.anchorCount ?? tool?.anchorCount ?? 2;
+    if (_pending!.anchors.length >= reqAnchors) {
       await _commitPending();
     } else {
       notifyListeners();
@@ -266,22 +331,7 @@ class DrawingController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Append a point to the pending freehand brush stroke.
-  void appendPointToPending(DrawingAnchor anchor) {
-    final current = _pending;
-    if (current == null) return;
-    final anchors = List<DrawingAnchor>.from(current.anchors);
-    if (anchors.isNotEmpty &&
-        anchors.last.timestamp == anchor.timestamp &&
-        anchors.last.price == anchor.price) {
-      return;
-    }
-    anchors.add(anchor);
-    _pending = current.copyWith(anchors: anchors);
-    notifyListeners();
-  }
-
-  /// Commit whatever is currently pending (e.g. at the end of a freehand brush gesture).
+  /// Commit whatever is currently pending.
   Future<void> commitPending() async {
     await _commitPending();
   }
@@ -296,8 +346,10 @@ class DrawingController extends ChangeNotifier {
     _bySymbol.putIfAbsent(_symbol, () => []).add(committed);
     _pushEdit(before, description: 'Add ${committed.tool.label.toLowerCase()}');
 
-    // One-shot tools return to pan mode so the user is not stuck drawing.
-    _activeTool = null;
+    if (!_continuousDrawingMode) {
+      _activeTool = null;
+      _activeAnalysisTool = null;
+    }
     _selectedId = committed.id;
     notifyListeners();
 

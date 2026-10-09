@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart';
 
 import 'package:app/domain/entities/candle_data.dart';
 import 'package:app/engine/indicators.dart';
+import 'package:app/models/indicator_style.dart';
 import 'package:app/models/instrument.dart';
 
 abstract class ChartDataSource implements Listenable {
@@ -21,6 +22,7 @@ abstract class ChartDataSource implements Listenable {
 
   ChartIndicators get indicators;
   Set<IndicatorType> get enabledIndicators;
+  Map<IndicatorType, IndicatorStyle> get indicatorStyles;
 
   /// Most recent close, used for the price header when no live tick is newer.
   double get lastPrice;
@@ -37,6 +39,7 @@ abstract class ChartDataSource implements Listenable {
   bool isIndicatorEnabled(IndicatorType t);
   void toggleIndicator(IndicatorType t);
   void setIndicators(Set<IndicatorType> next);
+  void setIndicatorStyle(IndicatorType t, IndicatorStyle style);
 
   /// Page in older candles when panning reaches the left edge. A no-op source
   /// (e.g. replay, which already holds its full bounded window) may complete

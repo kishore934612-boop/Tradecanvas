@@ -10,6 +10,7 @@ import 'package:app/components/ui.dart';
 import 'package:app/constants/colors.dart';
 import 'package:app/models/instrument.dart';
 import 'package:app/providers/app_state.dart';
+import 'package:app/providers/market_data_provider.dart';
 import 'package:app/screens/main_tabs_screen.dart';
 import 'package:app/utils/haptics.dart';
 
@@ -32,6 +33,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final TextEditingController _usernameController = TextEditingController();
 
   bool _isSettingUp = false;
+  bool _showNameError = false;
 
   final List<String> _availableCoins = const [
     'BTCUSDT',
@@ -55,6 +57,14 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   void _next() {
     Haptics.selection();
+    // Validate mandatory Name step (index 1)
+    if (_index == 1 && _username.trim().isEmpty) {
+      Haptics.vibrate();
+      setState(() => _showNameError = true);
+      return;
+    }
+    setState(() => _showNameError = false);
+
     if (_index < 4) {
       _pages.nextPage(
         duration: const Duration(milliseconds: 350),
@@ -82,6 +92,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   void _finish() {
     final appState = context.read<AppState>();
+    final marketData = context.read<MarketDataProvider>();
 
     // Update user profile preferences
     if (_username.trim().isNotEmpty) {
@@ -91,6 +102,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     appState.setFavoriteCoins(_favCoins.toList());
     appState.setDefaultTimeframe(_defaultTimeframe.apiValue);
     appState.completeOnboarding();
+
+    // Sync selected favourite coins directly as user's active watchlist coins
+    unawaited(marketData.replaceWatchlist(_favCoins.toList()));
 
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
@@ -216,34 +230,41 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       },
                     ),
                   const Spacer(),
-                  ElevatedButton(
-                    onPressed: _next,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: colors.primary,
-                      foregroundColor: colors.primaryForeground,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 28,
-                        vertical: 14,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      elevation: 0,
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _index == 4 ? 'Set Up Canvas' : 'Continue',
-                          style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.bold,
+                  Builder(
+                    builder: (context) {
+                      final isNameInvalid = _index == 1 && _username.trim().isEmpty;
+                      return ElevatedButton(
+                        onPressed: _next,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: isNameInvalid
+                              ? colors.primary.withValues(alpha: 0.5)
+                              : colors.primary,
+                          foregroundColor: colors.primaryForeground,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 28,
+                            vertical: 14,
                           ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          elevation: 0,
                         ),
-                        const SizedBox(width: 8),
-                        const Icon(Icons.arrow_forward_rounded, size: 18),
-                      ],
-                    ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _index == 4 ? 'Set Up Canvas' : 'Continue',
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Icon(Icons.arrow_forward_rounded, size: 18),
+                          ],
+                        ),
+                      );
+                    },
                   ),
                 ],
               ),
@@ -294,6 +315,55 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               fontSize: 14,
               color: colors.mutedForeground,
               height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          // Technical Analysis Disclaimer
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: colors.primary.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: colors.primary.withValues(alpha: 0.3),
+                width: 1,
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.info_outline_rounded,
+                  size: 20,
+                  color: colors.primary,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Technical Analysis Tool Only',
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.bold,
+                          color: colors.foreground,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        'TradeCanvas is exclusively a technical analysis and charting platform. It does not provide financial advice, broker execution, or investment recommendations.',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: colors.mutedForeground,
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -650,119 +720,172 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   }
 
   Widget _buildUserNamePage(ThemePalette colors) {
+    final bool hasError = _showNameError && _username.trim().isEmpty;
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(
-              color: colors.primary.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              'STEP 1 OF 4',
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.bold,
-                color: colors.primary,
-                letterSpacing: 0.5,
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Center(
-            child: Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: colors.primary.withValues(alpha: 0.1),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                Icons.person_rounded,
-                size: 48,
-                color: colors.primary,
-              ),
-            ),
-          ),
-          const SizedBox(height: 28),
-          Center(
-            child: Text(
-              'What should we call you?',
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w900,
-                color: colors.foreground,
-                letterSpacing: -0.4,
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Center(
-            child: Text(
-              'Enter your display name for your trading profile.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 13,
-                color: colors.mutedForeground,
-                height: 1.4,
-              ),
-            ),
-          ),
-          const SizedBox(height: 32),
-          TextField(
-            controller: _usernameController,
-            autofocus: true,
-            textCapitalization: TextCapitalization.words,
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
-              color: colors.foreground,
-            ),
-            decoration: InputDecoration(
-              hintText: 'e.g. Alex Trader',
-              hintStyle: TextStyle(
-                color: colors.mutedForeground.withValues(alpha: 0.6),
-                fontWeight: FontWeight.w400,
-              ),
-              prefixIcon: Icon(
-                Icons.badge_rounded,
-                color: colors.primary,
-              ),
-              filled: true,
-              fillColor: colors.card,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 16,
-                vertical: 16,
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(14),
-                borderSide: BorderSide(
-                  color: colors.border.withValues(alpha: 0.6),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: colors.primary.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    'STEP 1 OF 4',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: colors.primary,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
                 ),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(14),
-                borderSide: BorderSide(
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: colors.negative.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    'REQUIRED',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: colors.negative,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Center(
+              child: Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: colors.primary.withValues(alpha: 0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.person_rounded,
+                  size: 48,
                   color: colors.primary,
-                  width: 1.5,
                 ),
               ),
             ),
-            onChanged: (val) {
-              setState(() => _username = val);
-            },
-          ),
-          const SizedBox(height: 12),
-          Text(
-            'You can change this later in Settings.',
-            style: TextStyle(
-              fontSize: 11,
-              color: colors.mutedForeground.withValues(alpha: 0.7),
+            const SizedBox(height: 24),
+            Center(
+              child: Text(
+                'What should we call you?',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w900,
+                  color: colors.foreground,
+                  letterSpacing: -0.4,
+                ),
+              ),
             ),
-          ),
-        ],
+            const SizedBox(height: 8),
+            Center(
+              child: Text(
+                'Enter your display name to personalize your trading profile.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: colors.mutedForeground,
+                  height: 1.4,
+                ),
+              ),
+            ),
+            const SizedBox(height: 28),
+            TextField(
+              controller: _usernameController,
+              autofocus: true,
+              textCapitalization: TextCapitalization.words,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: colors.foreground,
+              ),
+              decoration: InputDecoration(
+                hintText: 'e.g. Alex Trader',
+                hintStyle: TextStyle(
+                  color: colors.mutedForeground.withValues(alpha: 0.6),
+                  fontWeight: FontWeight.w400,
+                ),
+                prefixIcon: Icon(
+                  Icons.badge_rounded,
+                  color: hasError ? colors.negative : colors.primary,
+                ),
+                filled: true,
+                fillColor: colors.card,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 16,
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: BorderSide(
+                    color: hasError
+                        ? colors.negative
+                        : colors.border.withValues(alpha: 0.6),
+                    width: hasError ? 1.5 : 1.0,
+                  ),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: BorderSide(
+                    color: hasError ? colors.negative : colors.primary,
+                    width: 1.5,
+                  ),
+                ),
+              ),
+              onChanged: (val) {
+                setState(() {
+                  _username = val;
+                  if (val.trim().isNotEmpty) {
+                    _showNameError = false;
+                  }
+                });
+              },
+            ),
+            const SizedBox(height: 8),
+            if (hasError)
+              Row(
+                children: [
+                  Icon(
+                    Icons.error_outline_rounded,
+                    size: 14,
+                    color: colors.negative,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    'Display name is required to continue.',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: colors.negative,
+                    ),
+                  ),
+                ],
+              )
+            else
+              Text(
+                'Your name will be displayed on your trading profile.',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: colors.mutedForeground.withValues(alpha: 0.7),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -797,7 +920,7 @@ class _CandleLoadingScreenState extends State<_CandleLoadingScreen>
     super.initState();
     _animController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 2500),
+      duration: const Duration(milliseconds: 4000),
     )..repeat();
 
     _generateFakeCandles();
@@ -818,15 +941,15 @@ class _CandleLoadingScreenState extends State<_CandleLoadingScreen>
   }
 
   void _startProgress() {
-    _progressTimer = Timer.periodic(const Duration(milliseconds: 60), (timer) {
+    _progressTimer = Timer.periodic(const Duration(milliseconds: 50), (timer) {
       if (!mounted) return;
       setState(() {
-        _progress += 0.025;
-        if (_progress > 0.3 && _progress < 0.6) {
+        _progress += 0.009; // ~5.5 seconds total smooth loading sequence
+        if (_progress > 0.25 && _progress < 0.55) {
           _statusText = 'Configuring market indicators…';
-        } else if (_progress >= 0.6 && _progress < 0.9) {
+        } else if (_progress >= 0.55 && _progress < 0.88) {
           _statusText = 'Syncing Binance websocket data…';
-        } else if (_progress >= 0.9) {
+        } else if (_progress >= 0.88) {
           _statusText = 'Canvas ready!';
         }
 
@@ -908,14 +1031,14 @@ class _CandleLoadingScreenState extends State<_CandleLoadingScreen>
           const SizedBox(height: 8),
 
           Text(
-            '${(_progress.clamp(0.0, 1.0) * 100).toInt()}%',
+            'Technical Analysis & Charting Tool Only',
             style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.bold,
-              color: colors.mutedForeground,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: colors.mutedForeground.withValues(alpha: 0.8),
             ),
           ),
-
+          const SizedBox(height: 16),
           const Spacer(),
         ],
       ),

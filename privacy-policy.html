@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy — TradeCanvas</title>
+    <style>
+        :root {
+            --bg: #0A0A0F;
+            --card: #13131A;
+            --border: #1E1E2A;
+            --text: #E8E8ED;
+            --muted: #8A8A9A;
+            --primary: #6C63FF;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            padding: 0 20px;
+        }
+        .container {
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 60px 0 80px;
+        }
+        h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+        .subtitle {
+            color: var(--muted);
+            font-size: 0.95rem;
+            margin-bottom: 40px;
+        }
+        h2 {
+            font-size: 1.15rem;
+            font-weight: 600;
+            margin-top: 32px;
+            margin-bottom: 12px;
+            color: var(--primary);
+        }
+        p, li {
+            color: var(--muted);
+            font-size: 0.95rem;
+            margin-bottom: 12px;
+        }
+        ul {
+            padding-left: 20px;
+            margin-bottom: 12px;
+        }
+        li { margin-bottom: 6px; }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+        a { color: var(--primary); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .badge {
+            display: inline-block;
+            background: var(--primary);
+            color: #fff;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 3px 10px;
+            border-radius: 20px;
+            margin-bottom: 20px;
+        }
+        footer {
+            border-top: 1px solid var(--border);
+            padding-top: 24px;
+            margin-top: 40px;
+            color: var(--muted);
+            font-size: 0.85rem;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <span class="badge">TradeCanvas</span>
+        <h1>Privacy Policy</h1>
+        <p class="subtitle">Last updated: August 28, 2026</p>
+
+        <div class="card">
+            <h2>1. Overview</h2>
+            <p>
+                TradeCanvas ("we", "our", or "the app") is a mobile application that provides live
+                candlestick charts, technical indicators, and drawing tools for Binance spot markets.
+                We are committed to protecting your privacy. This Privacy Policy describes how we
+                collect, use, and safeguard your information.
+            </p>
+        </div>
+
+        <div class="card">
+            <h2>2. Information We Collect</h2>
+            <p><strong>We do not collect personal information.</strong> Specifically:</p>
+            <ul>
+                <li>We do <strong>not</strong> require account creation or login.</li>
+                <li>We do <strong>not</strong> collect your name, email address, or phone number.</li>
+                <li>We do <strong>not</strong> use analytics or tracking SDKs.</li>
+                <li>We do <strong>not</strong> collect device identifiers or advertising IDs.</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>3. Local Data Storage</h2>
+            <p>
+                All user data — including chart drawings, indicator configurations, watchlists,
+                custom price markers, and preferences — is stored <strong>locally on your device</strong>
+                using SQLite and SharedPreferences. This data never leaves your device and is not
+                transmitted to any server.
+            </p>
+        </div>
+
+        <div class="card">
+            <h2>4. Network Connections</h2>
+            <p>
+                The app connects to Binance's public API endpoints to retrieve real-time market
+                data (prices, candlestick data, and ticker information). These connections are
+                made directly to:
+            </p>
+            <ul>
+                <li><code>api.binance.com</code> — REST API for market data</li>
+                <li><code>stream.binance.com</code> — WebSocket streams for real-time prices</li>
+            </ul>
+            <p>
+                We do not operate any intermediary servers. No personal data is sent in these
+                requests.
+            </p>
+        </div>
+
+        <div class="card">
+            <h2>5. Permissions</h2>
+            <p>The app requests the following Android permissions:</p>
+            <ul>
+                <li><strong>Internet</strong> — Required to fetch live market data from Binance.</li>
+                <li><strong>Notifications</strong> — Optional, used for price alert notifications.</li>
+                <li><strong>Wake Lock</strong> — Keeps WebSocket connections alive for real-time data.</li>
+            </ul>
+            <p>
+                No permission is used to access your contacts, camera, microphone, location,
+                or files.
+            </p>
+        </div>
+
+        <div class="card">
+            <h2>6. Third-Party Services</h2>
+            <p>
+                The app uses <strong>Google Fonts</strong> for typography, which may make network
+                requests to Google's font servers. Google's privacy policy applies to those
+                requests:
+                <a href="https://policies.google.com/privacy" target="_blank" rel="noopener">
+                    Google Privacy Policy
+                </a>.
+            </p>
+            <p>
+                No other third-party services, analytics platforms, or advertising networks
+                are integrated.
+            </p>
+        </div>
+
+        <div class="card">
+            <h2>7. Data Security</h2>
+            <p>
+                Since all user data is stored locally and we do not operate backend servers,
+                your data is protected by your device's built-in security measures (lock screen,
+                encryption, etc.). We recommend keeping your device software up to date.
+            </p>
+        </div>
+
+        <div class="card">
+            <h2>8. Children's Privacy</h2>
+            <p>
+                TradeCanvas is not directed at children under the age of 13. We do not knowingly
+                collect personal information from children. The app displays financial market data
+                for informational and educational purposes only.
+            </p>
+        </div>
+
+        <div class="card">
+            <h2>9. Changes to This Policy</h2>
+            <p>
+                We may update this Privacy Policy from time to time. Any changes will be reflected
+                on this page with an updated "Last updated" date. Continued use of the app after
+                changes constitutes acceptance of the revised policy.
+            </p>
+        </div>
+
+        <div class="card">
+            <h2>10. Contact</h2>
+            <p>
+                If you have any questions or concerns about this Privacy Policy, please contact us at:
+            </p>
+            <p><a href="mailto:your-email@example.com">your-email@example.com</a></p>
+        </div>
+
+        <footer>
+            &copy; 2026 TradeCanvas. All rights reserved.
+        </footer>
+    </div>
+</body>
+</html>

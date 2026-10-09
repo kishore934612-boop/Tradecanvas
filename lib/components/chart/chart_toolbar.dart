@@ -1,4 +1,4 @@
-/// Shared chart toolbar: timeframe chips + style/indicator/fullscreen actions.
+/// Shared chart toolbar: timeframe chips + style/indicator/session/object manager/fullscreen actions.
 ///
 /// Used by both the full Chart tab and the Dashboard's embedded chart panel so
 /// the two stay visually and behaviourally identical.
@@ -16,6 +16,12 @@ class ChartToolbar extends StatelessWidget {
   final ChartStyle style;
   final VoidCallback onToggleStyle;
   final VoidCallback onIndicators;
+  final bool hasActiveIndicators;
+  final VoidCallback? onStrategies;
+  final bool hasActiveStrategies;
+  final VoidCallback? onSmc;
+  final bool hasActiveSmc;
+  final VoidCallback? onObjectManager;
 
   /// Null hides the fullscreen button entirely.
   final VoidCallback? onToggleFullscreen;
@@ -28,6 +34,12 @@ class ChartToolbar extends StatelessWidget {
     required this.style,
     required this.onToggleStyle,
     required this.onIndicators,
+    this.hasActiveIndicators = false,
+    this.onStrategies,
+    this.hasActiveStrategies = false,
+    this.onSmc,
+    this.hasActiveSmc = false,
+    this.onObjectManager,
     this.onToggleFullscreen,
     this.fullscreen = false,
   });
@@ -65,8 +77,9 @@ class ChartToolbar extends StatelessWidget {
 
           ToolbarIconButton(
             icon: Icons.stacked_line_chart_rounded,
-            tooltip: 'Indicators',
+            tooltip: 'Indicators & Overlays',
             onTap: onIndicators,
+            active: hasActiveIndicators || hasActiveStrategies || hasActiveSmc,
           ),
           if (onToggleFullscreen != null)
             ToolbarIconButton(

@@ -16,7 +16,7 @@ List<CandleData> _single(CandleData c) => [c];
   required CandleData target,
 }) {
   final list = <CandleData>[];
-  final startTime = 1000000;
+  const startTime = 1000000;
   for (var i = 0; i < count; i++) {
     final price = basePrice + priceStep * i;
     list.add(CandleData(
