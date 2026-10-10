@@ -380,4 +380,60 @@ void main() {
       expect(signal, isNotNull);
     });
   });
+  group('Causal strategy policy', () {
+    test('cooldown uses chart bars on every timeframe', () {
+      List<StrategySignal> run(int interval) {
+        final candles = List.generate(35, (i) => CandleData(timestamp: i * interval,
+          open: 100.5, high: 105, low: 100, close: 104, volume: 100));
+        return StrategyEngine.evaluate(candles: candles,
+          activeStrategies: {StrategyType.supportBounce}, settings: const StrategySettings());
+      }
+      final minute = run(60000).map((s) => s.candleIndex).toList();
+      expect(minute, [20, 23, 26, 29, 32]);
+      expect(run(3600000).map((s) => s.candleIndex), minute);
+    });
+    test('forming candle cannot produce a confirmed signal', () {
+      final candles = _createSampleCandles(40);
+      final baseline = StrategyEngine.evaluate(candles: candles.sublist(0, 39),
+        activeStrategies: StrategyType.values.toSet(), settings: const StrategySettings());
+      candles.last.isLive = true;
+      final result = StrategyEngine.evaluate(candles: candles,
+        activeStrategies: StrategyType.values.toSet(), settings: const StrategySettings());
+      expect(result.map((s) => s.id), baseline.map((s) => s.id));
+    });
+    test('appending future candles never changes past signal identities', () {
+      final candles = _createSampleCandles(100);
+      const settings = StrategySettings(maxVisibleSignals: 10000);
+      final full = StrategyEngine.evaluate(candles: candles,
+        activeStrategies: StrategyType.values.toSet(), settings: settings);
+      for (var end = 20; end < 100; end += 7) {
+        final prefix = StrategyEngine.evaluate(candles: candles.sublist(0, end),
+          activeStrategies: StrategyType.values.toSet(), settings: settings);
+        expect(full.where((s) => s.candleIndex < end).map((s) => s.id), prefix.map((s) => s.id));
+      }
+    });
+    test('volume filter requires real warmup and positive volume', () {
+      final candles = List.generate(30, (i) => CandleData(timestamp: i * 60000,
+        open: 100.5, high: 105, low: 100, close: 104, volume: 0));
+      expect(StrategyEngine.evaluate(candles: candles,
+        activeStrategies: {StrategyType.supportBounce},
+        settings: const StrategySettings(requireVolumeConfirmation: true)), isEmpty);
+    });
+    test('invalid settings and unordered data do not produce signals', () {
+      final candles = _createSampleCandles(30);
+      expect(StrategyEngine.evaluate(candles: candles,
+        activeStrategies: StrategyType.values.toSet(),
+        settings: const StrategySettings(emaFastPeriod: 50, emaSlowPeriod: 20)), isEmpty);
+      expect(StrategyEngine.evaluate(candles: candles.reversed.toList(),
+        activeStrategies: StrategyType.values.toSet(), settings: const StrategySettings()), isEmpty);
+    });
+    test('new strategy controls survive persistence round trip', () {
+      const original = StrategySettings(cooldownBars: 7, requireVolumeConfirmation: true, volumeMultiplier: 2);
+      final copy = StrategySettings.fromJson(original.toJson());
+      expect(copy.cooldownBars, 7);
+      expect(copy.requireVolumeConfirmation, isTrue);
+      expect(copy.volumeMultiplier, 2);
+    });
+  });
+
 }

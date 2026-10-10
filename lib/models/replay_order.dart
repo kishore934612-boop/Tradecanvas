@@ -41,6 +41,14 @@ class ReplayOrder {
   int? exitAtTimestamp;
   String? exitReason; // 'tp_hit', 'sl_hit', 'manual_close', 'cancelled'
 
+  /// Costs and original risk are captured at fill, never changed by stop edits.
+  double entryFee = 0;
+  double exitFee = 0;
+  double feePercent = 0;
+  double? initialRiskAmount;
+  double get filledNotional => quantity * (fillPrice ?? price);
+  double get totalFees => entryFee + exitFee;
+
   ReplayOrder({
     required this.id,
     required this.side,
@@ -75,17 +83,12 @@ class ReplayOrder {
     final diff = isLong
         ? (currentPrice - fillPrice!)
         : (fillPrice! - currentPrice);
-    return (diff / fillPrice!) * positionSize;
+    return diff * quantity - entryFee - currentPrice * quantity * feePercent / 100;
   }
 
-  /// Unrealized P&L as a percentage of position size.
-  double unrealizedPnlPercent(double currentPrice) {
-    if (!isOpen || fillPrice == null) return 0.0;
-    final diff = isLong
-        ? (currentPrice - fillPrice!)
-        : (fillPrice! - currentPrice);
-    return (diff / fillPrice!) * 100.0;
-  }
+  /// Net mark-to-market return on actual entry notional.
+  double unrealizedPnlPercent(double currentPrice) =>
+      filledNotional > 0 ? unrealizedPnl(currentPrice) / filledNotional * 100 : 0;
 
   /// Realized P&L for a closed position.
   double realizedPnl() {
@@ -93,28 +96,15 @@ class ReplayOrder {
     final diff = isLong
         ? (exitPrice! - fillPrice!)
         : (fillPrice! - exitPrice!);
-    return (diff / fillPrice!) * positionSize;
+    return diff * quantity - totalFees;
   }
 
-  /// Realized P&L as a percentage.
-  double realizedPnlPercent() {
-    if (!isClosed || fillPrice == null || exitPrice == null) return 0.0;
-    final diff = isLong
-        ? (exitPrice! - fillPrice!)
-        : (fillPrice! - exitPrice!);
-    return (diff / fillPrice!) * 100.0;
-  }
+  double realizedPnlPercent() =>
+      filledNotional > 0 ? realizedPnl() / filledNotional * 100 : 0;
 
-  /// Risk-reward ratio achieved (for closed trades).
+  /// Net R multiple uses ORIGINAL risk, not a subsequently moved stop.
   double? achievedRiskReward() {
-    if (!isClosed || fillPrice == null || exitPrice == null || stopLossPrice == null) {
-      return null;
-    }
-    final risk = (fillPrice! - stopLossPrice!).abs();
-    if (risk <= 0) return null;
-    final reward = isLong
-        ? (exitPrice! - fillPrice!)
-        : (fillPrice! - exitPrice!);
-    return reward / risk;
+    final risk = initialRiskAmount;
+    return isClosed && risk != null && risk > 0 ? realizedPnl() / risk : null;
   }
 }
