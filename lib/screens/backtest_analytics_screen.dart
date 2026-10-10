@@ -2,6 +2,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:app/constants/colors.dart';
 import 'package:app/models/instrument.dart';
@@ -12,12 +13,14 @@ class BacktestAnalyticsScreen extends StatefulWidget {
   final Instrument instrument;
   final List<ReplayTrade> trades;
   final double currentPrice;
+  final double startingBalance;
 
   const BacktestAnalyticsScreen({
     super.key,
     required this.instrument,
     required this.trades,
     required this.currentPrice,
+    this.startingBalance = 10000,
   });
 
   @override
@@ -30,25 +33,19 @@ class _BacktestAnalyticsScreenState extends State<BacktestAnalyticsScreen> {
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
-    final closedTrades = widget.trades.where((t) => !t.isOpen).toList();
     final allFilteredTrades = widget.trades.where((t) {
       if (_filterIndex == 1) return t.isLong;
       if (_filterIndex == 2) return !t.isLong;
       return true;
     }).toList();
 
-    final totalTrades = closedTrades.length;
-    final wins = closedTrades.where((t) => t.pnl(widget.currentPrice) > 0).length;
-    final winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0.0;
-    
-    final grossProfit = closedTrades
-        .where((t) => t.pnl(widget.currentPrice) > 0)
-        .fold<double>(0.0, (acc, t) => acc + t.pnl(widget.currentPrice));
-    final grossLoss = closedTrades
-        .where((t) => t.pnl(widget.currentPrice) < 0)
-        .fold<double>(0.0, (acc, t) => acc + t.pnl(widget.currentPrice).abs());
-    final profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 99.9 : 0.0);
-    final netPnl = grossProfit - grossLoss;
+    final stats = ReplayAnalytics(allFilteredTrades, startingBalance: widget.startingBalance);
+    final closedTrades = stats.trades;
+    final totalTrades = stats.count;
+    final wins = stats.wins;
+    final winRate = stats.winRate;
+    final profitFactor = stats.profitFactor;
+    final netPnl = stats.netPnl;
 
     final longs = closedTrades.where((t) => t.isLong).toList();
     final longWins = longs.where((t) => t.pnl(widget.currentPrice) > 0).length;
@@ -71,6 +68,15 @@ class _BacktestAnalyticsScreenState extends State<BacktestAnalyticsScreen> {
             Navigator.pop(context);
           },
         ),
+        actions: [IconButton(
+          tooltip: 'Copy filtered trade journal as CSV',
+          icon: const Icon(Icons.copy_all_outlined),
+          onPressed: stats.count == 0 ? null : () async {
+            await Clipboard.setData(ClipboardData(text: stats.toCsv()));
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Trade journal CSV copied.')));
+          },
+        )],
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -97,6 +103,10 @@ class _BacktestAnalyticsScreenState extends State<BacktestAnalyticsScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Text('Paper simulation · net of fees · no live orders. '
+                'Filters apply to all metrics. Results do not predict future returns.',
+                style: TextStyle(fontSize: 12, color: colors.mutedForeground)),
+            const SizedBox(height: 12),
             // Top Overview Cards
             Row(
               children: [
@@ -111,9 +121,9 @@ class _BacktestAnalyticsScreenState extends State<BacktestAnalyticsScreen> {
                 _metricCard(
                   colors,
                   'Profit Factor',
-                  profitFactor.toStringAsFixed(2),
-                  'Gross P/L Ratio',
-                  profitFactor >= 1.5 ? colors.positive : colors.foreground,
+                  profitFactor == null ? 'N/A' : profitFactor.isInfinite ? '∞' : profitFactor.toStringAsFixed(2),
+                  'Net winners / net losers',
+                  (profitFactor ?? 0) >= 1.5 ? colors.positive : colors.foreground,
                 ),
               ],
             ),
@@ -131,8 +141,8 @@ class _BacktestAnalyticsScreenState extends State<BacktestAnalyticsScreen> {
                 _metricCard(
                   colors,
                   'Total Trades',
-                  '${widget.trades.length}',
-                  '${closedTrades.length} Closed / ${widget.trades.length - closedTrades.length} Open',
+                  '${allFilteredTrades.length}',
+                  '${closedTrades.length} Closed / ${allFilteredTrades.length - closedTrades.length} Open',
                   colors.primary,
                 ),
               ],
@@ -175,9 +185,9 @@ class _BacktestAnalyticsScreenState extends State<BacktestAnalyticsScreen> {
                       children: [
                         _metricCard(
                           colors,
-                          'Avg Risk:Reward',
-                          '1:${avgRr.toStringAsFixed(2)}',
-                          'Realized R:R Ratio',
+                          'Average Net R',
+                          '${avgRr.toStringAsFixed(2)} R',
+                          'Original risk at entry',
                           avgRr >= 1.5 ? colors.positive : colors.foreground,
                         ),
                         const SizedBox(width: 10),
@@ -196,6 +206,22 @@ class _BacktestAnalyticsScreenState extends State<BacktestAnalyticsScreen> {
             }),
             const SizedBox(height: 16),
 
+            Row(children: [
+              _metricCard(colors, 'Expectancy', '\$${stats.expectancy.toStringAsFixed(2)}',
+                  'Net per closed trade', colors.foreground),
+              const SizedBox(width: 10),
+              _metricCard(colors, 'Max Drawdown', '${stats.maxDrawdownPercent.toStringAsFixed(2)}%',
+                  'Closed-balance, filtered', colors.negative),
+            ]),
+            const SizedBox(height: 10),
+            Row(children: [
+              _metricCard(colors, 'Fees Paid', '\$${stats.totalFees.toStringAsFixed(2)}',
+                  'Closed trades only', colors.foreground),
+              const SizedBox(width: 10),
+              _metricCard(colors, 'Break-even', '${stats.breakEven}',
+                  'Zero net P&L', colors.foreground),
+            ]),
+            const SizedBox(height: 16),
             // Breakdown Section
             Container(
               padding: const EdgeInsets.all(14),

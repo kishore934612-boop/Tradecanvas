@@ -69,9 +69,9 @@ enum StrategyType {
       case StrategyType.bollingerReversal:
         return 'Detects candles closing outside Bollinger Bands followed by reversal confirmation.';
       case StrategyType.rsiExtreme:
-        return 'Flags potential momentum extremes when RSI enters oversold or overbought zones.';
+        return 'Flags recovery out of oversold or overbought zones after a closed candle.';
       case StrategyType.orderBlockRetest:
-        return 'Signals high-probability institutional entries when price returns to retest a Demand or Supply Order Block.';
+        return 'Highlights the first confirmed retest of an unbroken demand or supply zone; not evidence of institutional activity.';
       case StrategyType.fvgFillRejection:
         return 'Flags trade setups when price fills a Fair Value Gap (price imbalance) and confirms directional momentum.';
       case StrategyType.engulfing:
@@ -96,6 +96,9 @@ class StrategySettings {
   final double signalOpacity;
   final int maxVisibleSignals;
   final bool strictConfirmation;
+  final int cooldownBars;
+  final bool requireVolumeConfirmation;
+  final double volumeMultiplier;
   final double rsiUpperLevel;
   final double rsiLowerLevel;
   final int emaFastPeriod;
@@ -109,11 +112,20 @@ class StrategySettings {
     this.signalOpacity = 1.0,
     this.maxVisibleSignals = 50,
     this.strictConfirmation = true,
+    this.cooldownBars = 3,
+    this.requireVolumeConfirmation = false,
+    this.volumeMultiplier = 1.5,
     this.rsiUpperLevel = 70.0,
     this.rsiLowerLevel = 30.0,
     this.emaFastPeriod = 20,
     this.emaSlowPeriod = 50,
   });
+
+  bool get isValid => emaFastPeriod > 0 && emaSlowPeriod > emaFastPeriod &&
+      emaSlowPeriod <= 1000 && maxVisibleSignals >= 0 && cooldownBars >= 0 &&
+      rsiLowerLevel.isFinite && rsiUpperLevel.isFinite && rsiLowerLevel > 0 &&
+      rsiLowerLevel < rsiUpperLevel && rsiUpperLevel < 100 &&
+      volumeMultiplier.isFinite && volumeMultiplier > 0;
 
   StrategySettings copyWith({
     bool? enableLabels,
@@ -123,6 +135,9 @@ class StrategySettings {
     double? signalOpacity,
     int? maxVisibleSignals,
     bool? strictConfirmation,
+    int? cooldownBars,
+    bool? requireVolumeConfirmation,
+    double? volumeMultiplier,
     double? rsiUpperLevel,
     double? rsiLowerLevel,
     int? emaFastPeriod,
@@ -136,6 +151,9 @@ class StrategySettings {
       signalOpacity: signalOpacity ?? this.signalOpacity,
       maxVisibleSignals: maxVisibleSignals ?? this.maxVisibleSignals,
       strictConfirmation: strictConfirmation ?? this.strictConfirmation,
+      cooldownBars: cooldownBars ?? this.cooldownBars,
+      requireVolumeConfirmation: requireVolumeConfirmation ?? this.requireVolumeConfirmation,
+      volumeMultiplier: volumeMultiplier ?? this.volumeMultiplier,
       rsiUpperLevel: rsiUpperLevel ?? this.rsiUpperLevel,
       rsiLowerLevel: rsiLowerLevel ?? this.rsiLowerLevel,
       emaFastPeriod: emaFastPeriod ?? this.emaFastPeriod,
@@ -151,6 +169,9 @@ class StrategySettings {
         'signalOpacity': signalOpacity,
         'maxVisibleSignals': maxVisibleSignals,
         'strictConfirmation': strictConfirmation,
+        'cooldownBars': cooldownBars,
+        'requireVolumeConfirmation': requireVolumeConfirmation,
+        'volumeMultiplier': volumeMultiplier,
         'rsiUpperLevel': rsiUpperLevel,
         'rsiLowerLevel': rsiLowerLevel,
         'emaFastPeriod': emaFastPeriod,
@@ -165,6 +186,9 @@ class StrategySettings {
         signalOpacity: (j['signalOpacity'] as num?)?.toDouble() ?? 1.0,
         maxVisibleSignals: (j['maxVisibleSignals'] as num?)?.toInt() ?? 50,
         strictConfirmation: j['strictConfirmation'] as bool? ?? true,
+        cooldownBars: (j['cooldownBars'] as num?)?.toInt() ?? 3,
+        requireVolumeConfirmation: j['requireVolumeConfirmation'] as bool? ?? false,
+        volumeMultiplier: (j['volumeMultiplier'] as num?)?.toDouble() ?? 1.5,
         rsiUpperLevel: (j['rsiUpperLevel'] as num?)?.toDouble() ?? 70.0,
         rsiLowerLevel: (j['rsiLowerLevel'] as num?)?.toDouble() ?? 30.0,
         emaFastPeriod: (j['emaFastPeriod'] as num?)?.toInt() ?? 20,

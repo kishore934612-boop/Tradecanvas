@@ -15,6 +15,8 @@ class RiskCalculatorWidget extends StatefulWidget {
   final double? stopLossPrice;
   final double? takeProfitPrice;
   final bool isLong;
+  final double initialRiskPercent;
+  final bool includeEntrySlippage;
 
   /// Called when the user taps "Apply" with the calculated position size.
   final ValueChanged<RiskCalculation>? onApply;
@@ -26,6 +28,8 @@ class RiskCalculatorWidget extends StatefulWidget {
     this.stopLossPrice,
     this.takeProfitPrice,
     this.isLong = true,
+    this.initialRiskPercent = 1,
+    this.includeEntrySlippage = true,
     this.onApply,
   });
 
@@ -35,6 +39,7 @@ class RiskCalculatorWidget extends StatefulWidget {
 
 class _RiskCalculatorWidgetState extends State<RiskCalculatorWidget> {
   late double _riskPercent;
+  late bool _isLong;
   late TextEditingController _balanceController;
   late TextEditingController _slController;
   late TextEditingController _tpController;
@@ -44,15 +49,16 @@ class _RiskCalculatorWidgetState extends State<RiskCalculatorWidget> {
   @override
   void initState() {
     super.initState();
-    _riskPercent = 1.0;
+    _riskPercent = widget.initialRiskPercent;
+    _isLong = widget.isLong;
     _balanceController = TextEditingController(
-      text: widget.accountBalance.toStringAsFixed(0),
+      text: widget.accountBalance.toString(),
     );
     _slController = TextEditingController(
-      text: widget.stopLossPrice?.toStringAsFixed(2) ?? '',
+      text: widget.stopLossPrice?.toString() ?? '',
     );
     _tpController = TextEditingController(
-      text: widget.takeProfitPrice?.toStringAsFixed(2) ?? '',
+      text: widget.takeProfitPrice?.toString() ?? '',
     );
   }
 
@@ -65,18 +71,19 @@ class _RiskCalculatorWidgetState extends State<RiskCalculatorWidget> {
   }
 
   RiskCalculation _compute() {
-    final balance = double.tryParse(_balanceController.text) ?? widget.accountBalance;
+    final balance = double.tryParse(_balanceController.text) ?? double.nan;
     final sl = double.tryParse(_slController.text);
     final tp = double.tryParse(_tpController.text);
 
-    if (sl == null || sl <= 0) return RiskCalculation.zero;
+
 
     return RiskCalculator.compute(
       accountBalance: balance,
       riskPercent: _riskPercent,
-      entryPrice: widget.entryPrice,
-      stopLossPrice: sl,
-      takeProfitPrice: tp,
+      entryPrice: widget.entryPrice * (widget.includeEntrySlippage ? (1 + (_isLong ? 1 : -1) * 0.0005) : 1),
+      stopLossPrice: sl ?? double.nan,
+      takeProfitPrice: _tpController.text.trim().isEmpty ? null : tp ?? double.nan,
+      isLong: _isLong,
     );
   }
 
@@ -115,12 +122,18 @@ class _RiskCalculatorWidgetState extends State<RiskCalculatorWidget> {
           ),
           const SizedBox(height: 12),
 
+          SegmentedButton<bool>(
+            segments: const [ButtonSegment(value: true, label: Text('Long plan')),
+              ButtonSegment(value: false, label: Text('Short plan'))],
+            selected: {_isLong}, onSelectionChanged: (v) => setState(() => _isLong = v.first)),
+          const SizedBox(height: 12),
           // Account Balance & Risk % row.
           Row(
             children: [
               Expanded(
                 child: _InputField(
-                  label: 'Account Balance',
+                  label: 'Session Balance',
+                  readOnly: true,
                   suffix: 'USDT',
                   controller: _balanceController,
                   colors: colors,
@@ -234,7 +247,7 @@ class _RiskCalculatorWidgetState extends State<RiskCalculatorWidget> {
                   children: [
                     Expanded(
                       child: _ResultCell(
-                        label: 'Risk Amount',
+                        label: 'Est. Stop Loss + Costs',
                         value: '-\$${calc.riskAmount.toStringAsFixed(2)}',
                         colors: colors,
                         valueColor: colors.negative,
@@ -242,12 +255,12 @@ class _RiskCalculatorWidgetState extends State<RiskCalculatorWidget> {
                     ),
                     Expanded(
                       child: _ResultCell(
-                        label: 'Potential Reward',
-                        value: calc.potentialReward > 0
-                            ? '+\$${calc.potentialReward.toStringAsFixed(2)}'
+                        label: 'Net Target Reward',
+                        value: calc.netReward > 0
+                            ? '+\$${calc.netReward.toStringAsFixed(2)}'
                             : '—',
                         colors: colors,
-                        valueColor: calc.potentialReward > 0 ? colors.positive : null,
+                        valueColor: calc.netReward > 0 ? colors.positive : null,
                       ),
                     ),
                   ],
@@ -257,7 +270,7 @@ class _RiskCalculatorWidgetState extends State<RiskCalculatorWidget> {
                   children: [
                     Expanded(
                       child: _ResultCell(
-                        label: 'Risk:Reward',
+                        label: 'Net Risk:Reward',
                         value: calc.riskRewardRatio > 0
                             ? '1:${calc.riskRewardRatio.toStringAsFixed(2)}'
                             : '—',
@@ -280,6 +293,11 @@ class _RiskCalculatorWidgetState extends State<RiskCalculatorWidget> {
           ),
           const SizedBox(height: 14),
 
+          Text(calc.error ?? (calc.buyingPowerLimited
+              ? 'Size capped by 1x buying power. Actual risk is below the selected budget.'
+              : 'Includes 0.075% fees per side and 0.05% market slippage. Gaps can exceed estimated risk.'),
+              style: TextStyle(fontSize: 11, color: calc.isValid ? colors.mutedForeground : colors.negative)),
+          const SizedBox(height: 10),
           // Apply button.
           SizedBox(
             width: double.infinity,
@@ -293,7 +311,7 @@ class _RiskCalculatorWidgetState extends State<RiskCalculatorWidget> {
                   borderRadius: BorderRadius.circular(10),
                 ),
               ),
-              onPressed: calc.positionSize > 0
+              onPressed: calc.isValid
                   ? () {
                       Haptics.medium();
                       widget.onApply?.call(calc);
@@ -326,6 +344,7 @@ class _InputField extends StatelessWidget {
   final ThemePalette colors;
   final ValueChanged<String>? onChanged;
   final Color? textColor;
+  final bool readOnly;
 
   const _InputField({
     required this.label,
@@ -334,6 +353,7 @@ class _InputField extends StatelessWidget {
     required this.colors,
     this.onChanged,
     this.textColor,
+    this.readOnly = false,
   });
 
   @override
@@ -354,6 +374,7 @@ class _InputField extends StatelessWidget {
           height: 34,
           child: TextField(
             controller: controller,
+            readOnly: readOnly,
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             onChanged: onChanged,
             style: TextStyle(

@@ -11,10 +11,6 @@ import 'package:app/models/strategy_type.dart';
 class StrategyEngine {
   StrategyEngine._();
 
-  /// Minimum millisecond gap between two signals of the same strategy type.
-  /// Prevents duplicate signals firing on consecutive candles at the same level.
-  static const int _cooldownMs = 3 * 60 * 1000; // 3 candle intervals (safe for 1m+)
-
   /// Evaluate all active strategies on the given candle dataset and return detected signals.
   static List<StrategySignal> evaluate({
     required List<CandleData> candles,
@@ -22,10 +18,21 @@ class StrategyEngine {
     required StrategySettings settings,
     ChartIndicators? indicators,
   }) {
-    if (candles.length < 5 || activeStrategies.isEmpty) return const [];
+    if (!settings.isValid || settings.maxVisibleSignals == 0 ||
+        candles.length < 5 || activeStrategies.isEmpty) return const [];
+    // Never compute confirmed signals from the forming bar or later data.
+    final forming = candles.indexWhere((c) => c.isLive);
+    if (forming >= 0) candles = candles.sublist(0, forming);
+    for (var i = 0; i < candles.length; i++) {
+      final c = candles[i];
+      if (![c.open, c.high, c.low, c.close, c.volume].every((v) => v.isFinite) ||
+          c.low <= 0 || c.volume < 0 || c.high < math.max(c.open, c.close) ||
+          c.low > math.min(c.open, c.close) ||
+          (i > 0 && c.timestamp <= candles[i - 1].timestamp)) return const [];
+    }
 
     final signals = <StrategySignal>[];
-    final lastSignalTime = <StrategyType, int>{};
+    final lastSignalBar = <(StrategyType, bool), int>{};
 
     // Compute or re-use EMA indicators if needed
     List<double?>? fastEmaSeries;
@@ -55,9 +62,15 @@ class StrategyEngine {
 
     /// Helper to add a signal with cooldown deduplication.
     void addSignal(StrategySignal signal) {
-      final lastTime = lastSignalTime[signal.strategy] ?? 0;
-      if (signal.timestamp - lastTime < _cooldownMs) return;
-      lastSignalTime[signal.strategy] = signal.timestamp;
+      final candle = candles[signal.candleIndex];
+      if (settings.strictConfirmation && (candle.body == 0 ||
+          (signal.isBuy ? !candle.isBullish : !candle.isBearish))) return;
+      if (settings.requireVolumeConfirmation && !_hasVolumeConfirmation(
+          candles, signal.candleIndex, multiplier: settings.volumeMultiplier)) return;
+      final key = (signal.strategy, signal.isBuy);
+      final lastBar = lastSignalBar[key];
+      if (lastBar != null && signal.candleIndex - lastBar < settings.cooldownBars) return;
+      lastSignalBar[key] = signal.candleIndex;
       signals.add(signal);
     }
 
@@ -143,13 +156,13 @@ class StrategyEngine {
   static bool _hasVolumeConfirmation(List<CandleData> candles, int i,
       {double multiplier = 1.5}) {
     final lookback = math.min(20, i);
-    if (lookback < 5) return true; // not enough data, skip filter
+    if (lookback < 20) return false; // missing history is not confirmation
     double avgVol = 0;
     for (var j = i - lookback; j < i; j++) {
       avgVol += candles[j].volume;
     }
     avgVol /= lookback;
-    return avgVol <= 0 || candles[i].volume >= avgVol * multiplier;
+    return avgVol > 0 && candles[i].volume >= avgVol * multiplier;
   }
 
   /// Count how many candles in the lookback window touched a price level within tolerance.
@@ -169,7 +182,7 @@ class StrategyEngine {
 
   /// 1. Support Bounce Detection (with multi-touch validation + volume confirmation)
   static StrategySignal? _checkSupportBounce(List<CandleData> candles, int i) {
-    if (i < 5) return null;
+    if (i < 20) return null;
     final curr = candles[i];
 
     // Check candle confirmation: must be a bullish candle closing above support
@@ -189,9 +202,9 @@ class StrategyEngine {
     // Tolerance range for bounce (0.5% of price)
     final tolerance = minLow * 0.005;
 
-    // Touch validation: require at least 1 prior touch of the support level
+    // Touch validation: require at least 2 prior touches of the support level
     final touches = _countTouches(candles, lookbackStart, i, minLow, tolerance, useLow: true);
-    if (touches < 1) return null;
+    if (touches < 2) return null;
 
     // Current candle low touched/tested near support and closed above it
     if (curr.low <= minLow + tolerance && curr.close > minLow) {
@@ -215,7 +228,7 @@ class StrategyEngine {
   /// 2. Resistance Rejection Detection (with multi-touch validation + volume confirmation)
   static StrategySignal? _checkResistanceRejection(
       List<CandleData> candles, int i) {
-    if (i < 5) return null;
+    if (i < 20) return null;
     final curr = candles[i];
 
     // Check candle confirmation: must be a bearish candle closing below resistance
@@ -235,9 +248,9 @@ class StrategyEngine {
     // Tolerance range for rejection (0.5% of price)
     final tolerance = maxHigh * 0.005;
 
-    // Touch validation: require at least 1 prior touch of the resistance level
+    // Touch validation: require at least 2 prior touches of the resistance level
     final touches = _countTouches(candles, lookbackStart, i, maxHigh, tolerance, useLow: false);
-    if (touches < 1) return null;
+    if (touches < 2) return null;
 
     // Current candle high touched/tested near resistance and closed below it
     if (curr.high >= maxHigh - tolerance && curr.close < maxHigh) {
@@ -333,10 +346,13 @@ class StrategyEngine {
     final prevLower = bb.lower[i - 1];
     final prevUpper = bb.upper[i - 1];
 
-    if (prevLower == null || prevUpper == null) return null;
+    final lower = bb.lower[i];
+    final upper = bb.upper[i];
+    if (prevLower == null || prevUpper == null || lower == null || upper == null) return null;
+    final inside = currCandle.close >= lower && currCandle.close <= upper;
 
     // Bullish Reversal: Prev candle closes below lower BB, current candle closes bullish & back inside
-    if (prevCandle.close < prevLower && currCandle.isBullish && currCandle.close > prevLower) {
+    if (prevCandle.close < prevLower && currCandle.isBullish && inside) {
       return StrategySignal(
         id: 'bb_bull_${currCandle.timestamp}',
         strategy: StrategyType.bollingerReversal,
@@ -352,7 +368,7 @@ class StrategyEngine {
     }
 
     // Bearish Reversal: Prev candle closes above upper BB, current candle closes bearish & back inside
-    if (prevCandle.close > prevUpper && currCandle.isBearish && currCandle.close < prevUpper) {
+    if (prevCandle.close > prevUpper && currCandle.isBearish && inside) {
       return StrategySignal(
         id: 'bb_bear_${currCandle.timestamp}',
         strategy: StrategyType.bollingerReversal,
@@ -438,7 +454,9 @@ class StrategyEngine {
         final obBottom = obCandle.low;
 
         // Current candle touches or dips into Demand OB zone and closes bullishly
-        if (curr.low <= obTop && curr.high >= obBottom && curr.isBullish) {
+        final consumed = candles.sublist(j + 2, i).any((c) => c.low <= obTop);
+        if (!consumed && curr.low <= obTop && curr.high >= obBottom &&
+            curr.close > obTop && curr.isBullish) {
           return StrategySignal(
             id: 'ob_buy_${curr.timestamp}',
             strategy: StrategyType.orderBlockRetest,
@@ -460,7 +478,9 @@ class StrategyEngine {
         final obBottom = obCandle.low;
 
         // Current candle touches or rallies into Supply OB zone and closes bearishly
-        if (curr.high >= obBottom && curr.low <= obTop && curr.isBearish) {
+        final consumed = candles.sublist(j + 2, i).any((c) => c.high >= obBottom);
+        if (!consumed && curr.high >= obBottom && curr.low <= obTop &&
+            curr.close < obBottom && curr.isBearish) {
           return StrategySignal(
             id: 'ob_sell_${curr.timestamp}',
             strategy: StrategyType.orderBlockRetest,
@@ -496,12 +516,14 @@ class StrategyEngine {
       if (c2.range <= 0 || c2.body / c2.range < 0.35) continue;
 
       // Bullish FVG: c1.high < c3.low
-      if (c1.high < c3.low) {
+      if (c1.high < c3.low && c2.isBullish) {
         final fvgBottom = c1.high;
         final fvgTop = c3.low;
 
         // Current candle enters the FVG gap and closes bullishly above fvgBottom
-        if (curr.low <= fvgTop && curr.high >= fvgBottom && curr.isBullish) {
+        final consumed = candles.sublist(j + 1, i).any((c) => c.low <= fvgTop);
+        if (!consumed && curr.low <= fvgTop && curr.high >= fvgBottom &&
+            curr.close > fvgTop && curr.isBullish) {
           return StrategySignal(
             id: 'fvg_buy_${curr.timestamp}',
             strategy: StrategyType.fvgFillRejection,
@@ -518,12 +540,14 @@ class StrategyEngine {
       }
 
       // Bearish FVG: c1.low > c3.high
-      if (c1.low > c3.high) {
+      if (c1.low > c3.high && c2.isBearish) {
         final fvgTop = c1.low;
         final fvgBottom = c3.high;
 
         // Current candle enters the FVG gap and closes bearishly below fvgTop
-        if (curr.high >= fvgBottom && curr.low <= fvgTop && curr.isBearish) {
+        final consumed = candles.sublist(j + 1, i).any((c) => c.high >= fvgBottom);
+        if (!consumed && curr.high >= fvgBottom && curr.low <= fvgTop &&
+            curr.close < fvgBottom && curr.isBearish) {
           return StrategySignal(
             id: 'fvg_sell_${curr.timestamp}',
             strategy: StrategyType.fvgFillRejection,
@@ -598,52 +622,41 @@ class StrategyEngine {
     int i,
     List<double?> macdHist,
   ) {
-    if (i < 15) return null;
-
-    final curr = candles[i];
-    final currHist = macdHist[i];
-    if (currHist == null) return null;
-
-    // Look back for a previous swing point (4 to 20 candles ago)
-    for (var j = i - 4; j >= math.max(1, i - 20); j--) {
-      final prevHist = macdHist[j];
-      if (prevHist == null) continue;
-
-      // Bullish Divergence: Price forms lower low, but MACD histogram forms higher low
-      if (curr.low < candles[j].low && currHist > prevHist && prevHist < 0) {
-        if (!curr.isBullish) continue; // require bullish confirmation candle
-        return StrategySignal(
-          id: 'macd_div_bull_${curr.timestamp}',
-          strategy: StrategyType.macdDivergence,
-          timestamp: curr.timestamp,
-          candleIndex: i,
-          price: curr.low,
-          isBuy: true,
-          title: 'Bullish MACD Divergence',
-          shortTag: 'MACD Div',
-          explanation:
-              'Price formed a lower low but MACD histogram formed a higher low, signaling weakening bearish momentum and potential reversal.',
-        );
+    // Two right-hand bars confirm the pivot; emit NOW, never backdate it.
+    if (i < 8) return null;
+    final pivot = i - 2;
+    bool isPivot(int index, bool low) {
+      for (var k = index - 2; k <= index + 2; k++) {
+        if (k == index) continue;
+        if (low ? candles[k].low <= candles[index].low
+                : candles[k].high >= candles[index].high) return false;
       }
-
-      // Bearish Divergence: Price forms higher high, but MACD histogram forms lower high
-      if (curr.high > candles[j].high && currHist < prevHist && prevHist > 0) {
-        if (!curr.isBearish) continue; // require bearish confirmation candle
-        return StrategySignal(
-          id: 'macd_div_bear_${curr.timestamp}',
-          strategy: StrategyType.macdDivergence,
-          timestamp: curr.timestamp,
-          candleIndex: i,
-          price: curr.high,
-          isBuy: false,
-          title: 'Bearish MACD Divergence',
-          shortTag: 'MACD Div',
-          explanation:
-              'Price formed a higher high but MACD histogram formed a lower high, signaling weakening bullish momentum and potential reversal.',
-        );
+      return true;
+    }
+    final currentHist = macdHist[pivot];
+    if (currentHist == null) return null;
+    for (final buy in [true, false]) {
+      if (!isPivot(pivot, buy)) continue;
+      for (var j = pivot - 4; j >= math.max(2, pivot - 40); j--) {
+        final previousHist = macdHist[j];
+        if (previousHist == null || !isPivot(j, buy)) continue;
+        final divergent = buy
+            ? candles[pivot].low < candles[j].low && currentHist > previousHist && currentHist < 0
+            : candles[pivot].high > candles[j].high && currentHist < previousHist && currentHist > 0;
+        if (divergent) {
+          return StrategySignal(
+            id: 'macd_${buy ? 'bull' : 'bear'}_${candles[i].timestamp}',
+            strategy: StrategyType.macdDivergence, timestamp: candles[i].timestamp,
+            candleIndex: i, price: buy ? candles[i].low : candles[i].high,
+            isBuy: buy, title: '${buy ? 'Bullish' : 'Bearish'} MACD Divergence',
+            shortTag: 'MACD Div',
+            explanation: 'Price and MACD histogram diverged between two confirmed swing points. '
+                'The latest pivot is confirmed by two completed right-hand bars; this is not an entry guarantee.',
+          );
+        }
+        break; // compare consecutive eligible pivots, not cherry-picked history
       }
     }
-
     return null;
   }
 }
