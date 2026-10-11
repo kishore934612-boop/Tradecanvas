@@ -34,6 +34,11 @@ class _StrategyCustomizationScreenState
   }
 
   void _update(StrategySettings next) {
+    if (!next.isValid) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Fast EMA must be shorter than slow EMA; thresholds must be ordered.')));
+      return;
+    }
     Haptics.selection();
     setState(() {
       _current = next;
@@ -86,6 +91,10 @@ class _StrategyCustomizationScreenState
       body: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         children: [
+          Text('Closed-candle educational patterns, not automatic trade recommendations. '
+              'Signals do not establish a profitable edge.',
+              style: TextStyle(color: colors.mutedForeground, fontSize: 12)),
+          const SizedBox(height: 16),
           // Section 1: Visual Display Options
           const _SectionLabel('Visual Overlay Display'),
           GlassCard(
@@ -200,6 +209,17 @@ class _StrategyCustomizationScreenState
                       _update(_current.copyWith(strictConfirmation: val)),
                 ),
                 Divider(height: 1, color: colors.border.withValues(alpha: 0.4)),
+                SwitchListTile(
+                  title: const Text('Require volume confirmation'),
+                  subtitle: Text('${_current.volumeMultiplier}x previous 20-bar average; missing volume blocks signals'),
+                  value: _current.requireVolumeConfirmation,
+                  onChanged: (v) => _update(_current.copyWith(requireVolumeConfirmation: v)),
+                ),
+                _SliderTile(title: 'Signal cooldown',
+                  subtitle: '${_current.cooldownBars} chart bars per direction',
+                  value: _current.cooldownBars.toDouble(), min: 0, max: 20,
+                  divisions: 20, colors: colors,
+                  onChanged: (v) => _update(_current.copyWith(cooldownBars: v.round()))),
                 _SliderTile(
                   title: 'Fast EMA Period',
                   subtitle: '${_current.emaFastPeriod} bars',
@@ -262,21 +282,21 @@ class _StrategyCustomizationScreenState
                   _RuleRow(
                     icon: Icons.volume_up_rounded,
                     title: 'Volume Confirmation',
-                    desc: 'Signals require candle volume >= 1.5x of 20-period average.',
+                    desc: _current.requireVolumeConfirmation ? 'Enabled: ${_current.volumeMultiplier}x previous 20-bar average.' : 'Optional volume filter is disabled.',
                     colors: colors,
                   ),
                   const SizedBox(height: 10),
                   _RuleRow(
                     icon: Icons.timer_outlined,
                     title: 'Signal Cooldown',
-                    desc: 'Deduplicates consecutive identical signals within 3 minutes.',
+                    desc: 'Same strategy and direction wait ${_current.cooldownBars} chart bars, on every timeframe.',
                     colors: colors,
                   ),
                   const SizedBox(height: 10),
                   _RuleRow(
                     icon: Icons.touch_app_rounded,
                     title: 'Multi-Touch Validation',
-                    desc: 'Support/Resistance bounce requires at least 2 level touches.',
+                    desc: 'Support/resistance requires two prior touches. Zones signal only their first confirmed retest.',
                     colors: colors,
                   ),
                 ],

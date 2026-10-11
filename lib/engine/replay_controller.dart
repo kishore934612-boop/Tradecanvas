@@ -22,7 +22,9 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 
 import 'package:app/core/logging/logger.dart';
-import 'package:app/data/providers/market/binance_provider.dart';
+import 'package:app/data/providers/market/market_provider.dart';
+import 'package:app/engine/replay_execution.dart';
+import 'package:app/engine/risk_calculator.dart';
 import 'package:app/domain/entities/candle_data.dart';
 import 'package:app/engine/chart_data_source.dart';
 import 'package:app/engine/discipline_guardrails.dart';
@@ -39,7 +41,7 @@ const int kReplayCandleCount = 500;
 
 /// Bars need at least this many candles of lead-in before playback starts,
 /// so slow indicators like EMA200 aren't all-null on bar 1.
-const int kReplayLeadIn = 60;
+const int kReplayLeadIn = 200;
 
 /// Playback speed presets, in bars per second.
 enum ReplaySpeed {
@@ -76,7 +78,21 @@ Timeframe _higherTimeframe(Timeframe tf) {
 }
 
 class ReplayController extends ChangeNotifier implements ChartDataSource {
-  final BinanceProvider _provider;
+  final MarketProvider _provider;
+  final ReplayExecution execution;
+  int _loadGeneration = 0;
+  bool _disposed = false;
+  String? _lastOrderError;
+  double _peakEquity = 10000;
+
+  String? get lastOrderError => _lastOrderError;
+  double get equity => _accountBalance + openPositions.fold<double>(0,
+      (sum, o) => sum + o.unrealizedPnl(lastPrice) + o.entryFee);
+  double get peakEquity => _peakEquity;
+  double get drawdownPercent => _peakEquity > 0
+      ? math.max(0, (_peakEquity - equity) / _peakEquity * 100) : 0;
+  bool get hasTradingActivity => _pendingOrders.isNotEmpty || _filledOrders.isNotEmpty;
+  bool get canRewind => !hasTradingActivity && !_isLoading;
   final Logger _logger;
 
   Instrument _instrument;
@@ -157,7 +173,8 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
   VoidCallback? onPositionClosed;
 
   ReplayController({
-    required BinanceProvider provider,
+    required MarketProvider provider,
+    this.execution = const ReplayExecution(),
     required Logger logger,
     required Instrument instrument,
     Timeframe timeframe = Timeframe.h1,
@@ -283,7 +300,7 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
   double get sessionPnl => _accountBalance - _startingBalance;
   double get riskPercent => _riskPercent;
   int get consecutiveLosses => _consecutiveLosses;
-  int get totalTradesTaken => _closedTrades.length;
+  int get totalTradesTaken => _filledOrders.length;
 
   DisciplineSettings get disciplineSettings => _disciplineSettings;
   GuardrailViolation? get activeViolation => _activeViolation;
@@ -313,75 +330,71 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
 
   Future<void> load() async {
     pause();
+    final generation = ++_loadGeneration;
     _isLoading = true;
     _error = null;
-    notifyListeners();
-
-    final fetched = await _provider.fetchOHLC(
-      _instrument.symbol,
-      _timeframe.apiValue,
-      limit: kReplayCandleCount,
-    );
-
-    if (fetched.length <= kReplayLeadIn) {
-      _error = fetched.isEmpty
-          ? 'No history available for ${_instrument.displayName}.'
-          : 'Not enough history to replay on ${_timeframe.label}. Try a '
-              'lower timeframe.';
-      _logger.warning(
-          'Replay load insufficient for ${_instrument.symbol}: ${fetched.length} candles');
-      _isLoading = false;
-      notifyListeners();
-      return;
-    }
-
-    _fullHistory = fetched;
-    // Historical bars are all closed; replay never shows a "live" candle.
-    for (final c in _fullHistory) {
-      c.isLive = false;
-    }
-
-    _playhead = kReplayLeadIn - 1;
+    _fullHistory = [];
+    _htfCandles = [];
+    _htfTrend = null;
+    _playhead = -1;
+    resetSession();
     _recompute();
-
-    // Load HTF data for MTF dashboard.
-    await _loadHtfData();
-
-    _isLoading = false;
-    _error = null;
-    notifyListeners();
+    try {
+      final fetched = await _provider.fetchOHLC(
+        _instrument.symbol, _timeframe.apiValue, limit: kReplayCandleCount);
+      if (_disposed || generation != _loadGeneration) return;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final closed = fetched.where((c) => !c.isLive &&
+          c.timestamp + _timeframe.durationMs <= now).toList();
+      for (var i = 0; i < closed.length; i++) {
+        final c = closed[i];
+        if (![c.open, c.high, c.low, c.close, c.volume].every((v) => v.isFinite) ||
+            c.low <= 0 || c.volume < 0 || c.high < math.max(c.open, c.close) ||
+            c.low > math.min(c.open, c.close) ||
+            (i > 0 && c.timestamp <= closed[i - 1].timestamp)) {
+          throw const FormatException('Invalid or unordered historical candles.');
+        }
+      }
+      if (closed.length <= kReplayLeadIn) {
+        throw const FormatException('Need more than 200 closed candles. Try a lower timeframe.');
+      }
+      _fullHistory = closed.map((c) => c.copyWith(isLive: false)).toList();
+      _playhead = kReplayLeadIn - 1;
+      _recompute();
+      final htf = _higherTimeframe(_timeframe);
+      if (htf != _timeframe) {
+        final fetchedHtf = await _provider.fetchOHLC(_instrument.symbol,
+            htf.apiValue, limit: 1000,
+            endTime: _fullHistory.last.timestamp + _timeframe.durationMs - 1);
+        if (_disposed || generation != _loadGeneration) return;
+        _htfCandles = fetchedHtf.map((c) => c.copyWith()).toList();
+        _recomputeHtfTrend();
+      }
+    } catch (e) {
+      if (_disposed || generation != _loadGeneration) return;
+      _logger.warning('Replay history load failed: $e');
+      // A failed HTF request must not destroy a valid primary replay window.
+      if (_fullHistory.isEmpty) _error = 'Unable to load replay: $e';
+    } finally {
+      if (!_disposed && generation == _loadGeneration) {
+        _isLoading = false;
+        notifyListeners();
+      }
+    }
   }
 
-  Future<void> _loadHtfData() async {
-    try {
-      final htfTf = _higherTimeframe(_timeframe);
-      if (htfTf == _timeframe) {
-        _htfCandles = [];
-        _htfTrend = null;
-        return;
-      }
-      _htfCandles = await _provider.fetchOHLC(
-        _instrument.symbol,
-        htfTf.apiValue,
-        limit: 200,
-      );
-      _recomputeHtfTrend();
-    } catch (e) {
-      _logger.warning('HTF data load failed: $e');
-      _htfCandles = [];
-      _htfTrend = null;
-    }
+  /// Only completed HTF bars known at the current replay close are visible.
+  List<CandleData> get visibleHtfCandles {
+    if (_playhead < 0) return const [];
+    final cutoff = _fullHistory[_playhead].timestamp + _timeframe.durationMs;
+    return List.unmodifiable(_htfCandles.where((c) => !c.isLive &&
+        c.timestamp + htfTimeframe.durationMs <= cutoff));
   }
 
   void _recomputeHtfTrend() {
-    if (_htfCandles.length < 20) {
-      _htfTrend = null;
-      return;
-    }
-    _htfTrend = SmcEngine.evaluateTrend(
-      candles: _htfCandles,
-      settings: const SmcSettings(),
-    );
+    final visible = visibleHtfCandles;
+    _htfTrend = visible.length < 20 ? null : SmcEngine.evaluateTrend(
+      candles: visible, settings: const SmcSettings());
   }
 
   void _recomputeVolumeProfile() {
@@ -409,67 +422,83 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
   // ==========================================================
 
   void setAccountBalance(double balance) {
+    if (!balance.isFinite || balance <= 0 || hasTradingActivity) return;
     _accountBalance = balance;
     _startingBalance = balance;
-    notifyListeners();
-  }
-
-  void setRiskPercent(double percent) {
-    _riskPercent = percent.clamp(0.1, 10.0);
-    notifyListeners();
-  }
-
-  void setDisciplineSettings(DisciplineSettings settings) {
-    _disciplineSettings = settings;
-    // Re-check violations with new settings.
+    _peakEquity = balance;
     _checkDiscipline();
     notifyListeners();
   }
 
-  // ==========================================================
-  // ORDER PLACEMENT
-  // ==========================================================
+  void setRiskPercent(double percent) {
+    if (!percent.isFinite || percent <= 0 || percent > 10) return;
+    _riskPercent = percent;
+    notifyListeners();
+  }
 
-  /// Place a new order. Returns the order ID, or null if blocked by guardrails.
+  void setDisciplineSettings(DisciplineSettings settings) {
+    if (!settings.isValid) return;
+    _disciplineSettings = settings;
+    _activeViolation = null;
+    _checkDiscipline();
+    notifyListeners();
+  }
+
+  RiskCalculation calculateOrderRisk({required OrderSide side,
+      required OrderType type, required double price, required double stopLossPrice,
+      double? takeProfitPrice}) => RiskCalculator.compute(
+    accountBalance: _accountBalance, riskPercent: _riskPercent,
+    entryPrice: type == OrderType.limit ? price : execution.marketFill(price, side),
+    stopLossPrice: stopLossPrice, takeProfitPrice: takeProfitPrice,
+    isLong: side == OrderSide.buy, feePercent: execution.feePercent,
+    slippagePercent: execution.slippagePercent);
+
+  String? _reject(String message) {
+    _lastOrderError = message;
+    notifyListeners();
+    return null;
+  }
+
+  /// Queue an order for the next bar. Current close is never a retroactive fill.
+  /// All entry paths enforce the same risk policy, even non-UI callers.
   String? placeOrder({
-    required OrderSide side,
-    required OrderType type,
-    required double price,
-    double? stopLossPrice,
-    double? takeProfitPrice,
-    required double positionSize,
-    required double quantity,
+    required OrderSide side, required OrderType type, required double price,
+    double? stopLossPrice, double? takeProfitPrice,
+    required double positionSize, required double quantity,
   }) {
-    // Check discipline guardrails.
-    if (_activeViolation != null) return null;
-
-    // Only one position at a time.
-    if (openPosition != null && type == OrderType.market) return null;
-
-    final id = 'order_${_nextOrderId++}';
-    final order = ReplayOrder(
-      id: id,
-      side: side,
-      type: type,
-      price: price,
-      stopLossPrice: stopLossPrice,
-      takeProfitPrice: takeProfitPrice,
-      positionSize: positionSize,
-      quantity: quantity,
-      createdAtBar: _playhead,
-      createdAtTimestamp: _playhead >= 0 ? _fullHistory[_playhead].timestamp : 0,
-    );
-
-    if (type == OrderType.market) {
-      // Fill immediately at current close price.
-      _fillOrder(order, _playhead >= 0 ? _fullHistory[_playhead].close : price);
-    } else {
-      _pendingOrders.add(order);
+    _lastOrderError = null;
+    if (_isLoading || !hasData || isAtEnd) return _reject('Load a replay with a next bar before trading.');
+    _checkDiscipline();
+    if (_activeViolation != null) return _reject(_activeViolation!.label);
+    if (hasOpenOrPendingOrder) return _reject('Close or cancel the existing order first.');
+    if (!execution.isValid) return _reject('Invalid simulation cost settings.');
+    if (![price, positionSize, quantity].every((v) => v.isFinite && v > 0)) {
+      return _reject('Price and quantity must be positive finite values.');
     }
-
+    if (stopLossPrice == null) return _reject('A protective stop loss is required.');
+    if (type != OrderType.market) {
+      final below = type == OrderType.limit ? side == OrderSide.buy : side == OrderSide.sell;
+      if (below ? price >= lastPrice : price <= lastPrice) {
+        return _reject('Limit entries must improve price; stop entries must be beyond market.');
+      }
+    }
+    final plannedPrice = type == OrderType.market ? lastPrice : price;
+    final calc = calculateOrderRisk(side: side, type: type, price: plannedPrice,
+        stopLossPrice: stopLossPrice, takeProfitPrice: takeProfitPrice);
+    if (!calc.isValid) return _reject(calc.error ?? 'Invalid trade plan.');
+    if (quantity > calc.quantity * (1 + 1e-9)) {
+      return _reject('Quantity exceeds the risk budget or available buying power.');
+    }
+    final id = 'order_${_nextOrderId++}';
+    _pendingOrders.add(ReplayOrder(id: id, side: side, type: type,
+      price: plannedPrice, stopLossPrice: stopLossPrice, takeProfitPrice: takeProfitPrice,
+      positionSize: quantity * plannedPrice, quantity: quantity,
+      createdAtBar: _playhead, createdAtTimestamp: _fullHistory[_playhead].timestamp));
     notifyListeners();
     return id;
   }
+
+  bool get hasOpenOrPendingOrder => openPosition != null || _pendingOrders.isNotEmpty;
 
   /// Cancel a pending order.
   void cancelOrder(String id) {
@@ -483,139 +512,118 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
     notifyListeners();
   }
 
-  /// Modify TP/SL on an open position.
-  void modifyPosition({double? stopLossPrice, double? takeProfitPrice}) {
+  /// Stops may tighten, never widen original risk. Reject crossed brackets.
+  bool modifyPosition({double? stopLossPrice, double? takeProfitPrice}) {
     final pos = openPosition;
-    if (pos == null) return;
-    if (stopLossPrice != null) pos.stopLossPrice = stopLossPrice;
-    if (takeProfitPrice != null) pos.takeProfitPrice = takeProfitPrice;
+    if (pos == null) return false;
+    final sl = stopLossPrice ?? pos.stopLossPrice!;
+    final tp = takeProfitPrice ?? pos.takeProfitPrice;
+    if (!sl.isFinite || sl <= 0 || (pos.isLong ? sl >= lastPrice : sl <= lastPrice) ||
+        (pos.isLong ? sl < pos.stopLossPrice! : sl > pos.stopLossPrice!) ||
+        (tp != null && (!tp.isFinite || tp <= 0 || (pos.isLong ? tp <= lastPrice : tp >= lastPrice)))) {
+      _reject('Stop may only tighten and brackets must remain on the correct side of market.');
+      return false;
+    }
+    pos.stopLossPrice = sl;
+    pos.takeProfitPrice = tp;
+    _lastOrderError = null;
     notifyListeners();
+    return true;
   }
 
-  /// Manually close the open position at current market price.
   void closePosition() {
     final pos = openPosition;
     if (pos == null || _playhead < 0) return;
-    _closeOrder(pos, _fullHistory[_playhead].close, 'manual_close');
+    _closeOrder(pos, execution.marketFill(lastPrice,
+        pos.isLong ? OrderSide.sell : OrderSide.buy), 'manual_close');
     notifyListeners();
   }
 
-  void _fillOrder(ReplayOrder order, double fillPrice) {
+  bool _fillOrder(ReplayOrder order, double fillPrice) {
+    final calc = RiskCalculator.compute(accountBalance: _accountBalance,
+      riskPercent: _riskPercent, entryPrice: fillPrice,
+      stopLossPrice: order.stopLossPrice!, takeProfitPrice: order.takeProfitPrice,
+      isLong: order.isLong, feePercent: execution.feePercent,
+      slippagePercent: execution.slippagePercent);
+    if (!calc.isValid || order.quantity > calc.quantity * (1 + 1e-9)) {
+      order.status = OrderStatus.cancelled;
+      _lastOrderError = 'Order cancelled: fill would violate brackets, risk or buying power after a price gap.';
+      return false;
+    }
     order.status = OrderStatus.filled;
     order.fillPrice = fillPrice;
     order.filledAtBar = _playhead;
-    order.filledAtTimestamp = _playhead >= 0 ? _fullHistory[_playhead].timestamp : 0;
+    order.filledAtTimestamp = _fullHistory[_playhead].timestamp;
+    order.feePercent = execution.feePercent;
+    order.entryFee = execution.fee(fillPrice, order.quantity);
+    order.initialRiskAmount = execution.stopRisk(order, fillPrice);
+    _accountBalance -= order.entryFee;
     _filledOrders.add(order);
-    _logger.info('Order filled: ${order.id} ${order.side.name} @ $fillPrice');
     onOrderFilled?.call();
+    return true;
   }
 
   void _closeOrder(ReplayOrder order, double exitPrice, String reason) {
+    if (!order.isOpen) return;
     order.exitPrice = exitPrice;
     order.exitAtBar = _playhead;
-    order.exitAtTimestamp = _playhead >= 0 ? _fullHistory[_playhead].timestamp : 0;
+    order.exitAtTimestamp = _fullHistory[_playhead].timestamp;
     order.exitReason = reason;
-
-    // Update account balance.
+    order.exitFee = execution.fee(exitPrice, order.quantity);
     final pnl = order.realizedPnl();
-    _accountBalance += pnl;
-
-    // Track consecutive losses.
-    if (pnl < 0) {
-      _consecutiveLosses++;
-    } else {
-      _consecutiveLosses = 0;
-    }
-
+    // Entry fees were already paid at fill.
+    _accountBalance += pnl + order.entryFee;
+    _consecutiveLosses = pnl < 0 ? _consecutiveLosses + 1 : 0;
     _closedTrades.add(order);
-    _logger.info('Position closed: ${order.id} reason=$reason pnl=${pnl.toStringAsFixed(2)}');
-    onPositionClosed?.call();
-
-    // Check discipline guardrails after close.
+    _logger.info('Position closed: ${order.id} reason=$reason net=$pnl');
     _checkDiscipline();
+    onPositionClosed?.call();
   }
 
-  /// Process pending orders and TP/SL against the current candle.
   void _processOrders() {
     if (_playhead < 0) return;
     final candle = _fullHistory[_playhead];
-
-    // 1. Check pending limit/stop orders.
-    final toRemove = <ReplayOrder>[];
-    for (final order in _pendingOrders) {
-      bool shouldFill = false;
-      double fillPrice = order.price;
-
-      if (order.type == OrderType.limit) {
-        if (order.side == OrderSide.buy && candle.low <= order.price) {
-          shouldFill = true;
-          fillPrice = order.price;
-        } else if (order.side == OrderSide.sell && candle.high >= order.price) {
-          shouldFill = true;
-          fillPrice = order.price;
-        }
-      } else if (order.type == OrderType.stopMarket) {
-        if (order.side == OrderSide.buy && candle.high >= order.price) {
-          shouldFill = true;
-          fillPrice = order.price;
-        } else if (order.side == OrderSide.sell && candle.low <= order.price) {
-          shouldFill = true;
-          fillPrice = order.price;
-        }
-      }
-
-      if (shouldFill && openPosition == null) {
-        _fillOrder(order, fillPrice);
-        toRemove.add(order);
-      }
-    }
-    _pendingOrders.removeWhere((o) => toRemove.contains(o));
-
-    // 2. Check TP/SL on open positions.
-    final positions = _filledOrders.where((o) => o.isOpen).toList();
-    for (final pos in positions) {
-      // Check Stop Loss first (SL has priority over TP for risk management).
-      if (pos.stopLossPrice != null) {
-        if (pos.isLong && candle.low <= pos.stopLossPrice!) {
-          _closeOrder(pos, pos.stopLossPrice!, 'sl_hit');
-          continue;
-        }
-        if (pos.isShort && candle.high >= pos.stopLossPrice!) {
-          _closeOrder(pos, pos.stopLossPrice!, 'sl_hit');
-          continue;
-        }
-      }
-
-      // Check Take Profit.
-      if (pos.takeProfitPrice != null) {
-        if (pos.isLong && candle.high >= pos.takeProfitPrice!) {
-          _closeOrder(pos, pos.takeProfitPrice!, 'tp_hit');
-          continue;
-        }
-        if (pos.isShort && candle.low <= pos.takeProfitPrice!) {
-          _closeOrder(pos, pos.takeProfitPrice!, 'tp_hit');
-          continue;
+    final existing = openPosition;
+    if (existing != null) {
+      final exit = execution.exit(existing, candle);
+      if (exit != null) _closeOrder(existing, exit.price, exit.reason);
+    } else if (_activeViolation == null && _pendingOrders.isNotEmpty) {
+      final order = _pendingOrders.first;
+      if (order.createdAtBar < _playhead) {
+        final entry = execution.entry(order, candle);
+        if (entry != null) {
+          _pendingOrders.remove(order);
+          if (_fillOrder(order, entry.price)) {
+            final exit = execution.exit(order, candle, enteredIntrabar: !entry.atOpen);
+            if (exit != null) _closeOrder(order, exit.price, exit.reason);
+          }
         }
       }
     }
+    _checkDiscipline();
   }
 
   void _checkDiscipline() {
-    _activeViolation = DisciplineGuardrails.checkViolation(
-      settings: _disciplineSettings,
-      startingBalance: _startingBalance,
-      currentBalance: _accountBalance,
-      consecutiveLosses: _consecutiveLosses,
-      totalTrades: _closedTrades.length,
-    );
+    _peakEquity = math.max(_peakEquity, equity);
+    _activeViolation ??= DisciplineGuardrails.checkViolation(
+      settings: _disciplineSettings, startingBalance: _peakEquity,
+      currentBalance: equity, consecutiveLosses: _consecutiveLosses,
+      totalTrades: totalTradesTaken);
+    if (_activeViolation != null) {
+      for (final order in _pendingOrders) { order.status = OrderStatus.cancelled; }
+      _pendingOrders.clear();
+    }
   }
 
   /// Reset the entire trading session (balance, trades, guardrails).
   void resetSession() {
+    pause();
     _pendingOrders.clear();
     _filledOrders.clear();
     _closedTrades.clear();
     _accountBalance = _startingBalance;
+    _peakEquity = _startingBalance;
+    _lastOrderError = null;
     _consecutiveLosses = 0;
     _activeViolation = null;
     notifyListeners();
@@ -626,7 +634,7 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
   // ==========================================================
 
   void play() {
-    if (_isPlaying || isAtEnd || _playhead < 0) return;
+    if (_isLoading || _isPlaying || isAtEnd || _playhead < 0) return;
     _isPlaying = true;
     _scheduleTick();
     notifyListeners();
@@ -651,6 +659,7 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
 
   /// Advance exactly one bar. Pauses playback if it reaches the end.
   void stepForward() {
+    if (_isLoading || !hasData) return;
     if (_playhead >= _fullHistory.length - 1) {
       pause();
       return;
@@ -664,7 +673,7 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
 
   /// Step back one bar. Manual only — does not resume auto-play.
   void stepBackward() {
-    if (_playhead <= kReplayLeadIn - 1) return;
+    if (!canRewind || _playhead <= kReplayLeadIn - 1) return;
     pause();
     _playhead--;
     _recompute();
@@ -673,17 +682,28 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
 
   /// Jump to a specific point in [0, 1] along the replay timeline.
   void seekToProgress(double value) {
-    if (totalBars <= 0) return;
+    if (_isLoading || !value.isFinite || totalBars <= 0) return;
     pause();
-    final target = kReplayLeadIn - 1 + (value.clamp(0.0, 1.0) * totalBars).round();
-    _playhead = target.clamp(kReplayLeadIn - 1, _fullHistory.length - 1);
+    final target = (kReplayLeadIn - 1 + (value.clamp(0.0, 1.0) * totalBars).round())
+        .clamp(kReplayLeadIn - 1, _fullHistory.length - 1);
+    if (target < _playhead && !canRewind) {
+      _reject('Restart the session before rewinding recorded trades.');
+      return;
+    }
+    while (_playhead < target) {
+      _playhead++;
+      _processOrders();
+    }
+    _playhead = target;
     _recompute();
     notifyListeners();
   }
 
-  /// Restart from the beginning of the playable window.
+  /// Restart clears the account ledger; old trades cannot survive rewinding.
   void restart() {
+    if (_isLoading || _fullHistory.isEmpty) return;
     pause();
+    resetSession();
     _playhead = kReplayLeadIn - 1;
     _recompute();
     notifyListeners();
@@ -718,6 +738,7 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
     // genuinely warms up over the replay rather than being visible from bar 1
     // using future data it shouldn't have access to yet.
     _indicators = CandleEngine.computeAll(candles);
+    _recomputeHtfTrend();
     if (_volumeProfileEnabled) {
       _recomputeVolumeProfile();
     }
@@ -725,6 +746,8 @@ class ReplayController extends ChangeNotifier implements ChartDataSource {
 
   @override
   void dispose() {
+    _disposed = true;
+    _loadGeneration++;
     _tickTimer?.cancel();
     super.dispose();
   }

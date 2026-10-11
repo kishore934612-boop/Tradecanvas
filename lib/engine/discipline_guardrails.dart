@@ -36,7 +36,7 @@ enum GuardrailViolation {
 
 /// Configuration for discipline guardrails.
 class DisciplineSettings {
-  /// Maximum drawdown from starting balance before session is locked (%).
+  /// Maximum drawdown from peak equity before session is locked (%).
   final double maxDailyDrawdownPercent;
 
   /// Maximum consecutive losing trades before session is locked.
@@ -57,11 +57,15 @@ class DisciplineSettings {
     this.maxDailyDrawdownPercent = 3.0,
     this.maxConsecutiveLosses = 3,
     this.maxTradesPerSession = 10,
-    this.enabled = false,
+    this.enabled = true,
     this.drawdownEnabled = true,
     this.consecutiveLossesEnabled = true,
     this.maxTradesEnabled = true,
   });
+
+  bool get isValid => maxDailyDrawdownPercent.isFinite &&
+      maxDailyDrawdownPercent > 0 && maxDailyDrawdownPercent <= 100 &&
+      maxConsecutiveLosses > 0 && maxTradesPerSession > 0;
 
   DisciplineSettings copyWith({
     double? maxDailyDrawdownPercent,
@@ -103,7 +107,7 @@ class DisciplineSettings {
             (j['maxConsecutiveLosses'] as num?)?.toInt() ?? 3,
         maxTradesPerSession:
             (j['maxTradesPerSession'] as num?)?.toInt() ?? 10,
-        enabled: j['enabled'] as bool? ?? false,
+        enabled: j['enabled'] as bool? ?? true,
         drawdownEnabled: j['drawdownEnabled'] as bool? ?? true,
         consecutiveLossesEnabled:
             j['consecutiveLossesEnabled'] as bool? ?? true,
@@ -124,6 +128,8 @@ class DisciplineGuardrails {
     required int consecutiveLosses,
     required int totalTrades,
   }) {
+    if (!settings.isValid || !startingBalance.isFinite || !currentBalance.isFinite ||
+        startingBalance <= 0 || currentBalance <= 0) return GuardrailViolation.maxDrawdown;
     if (!settings.enabled) return null;
 
     // 1. Max drawdown check.

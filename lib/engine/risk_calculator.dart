@@ -5,7 +5,14 @@
 /// widget and the order placement in ReplayController.
 library;
 
+import 'dart:math' as math;
+
 class RiskCalculation {
+  /// Validation feedback; invalid calculations cannot be applied.
+  final String? error;
+  final bool buyingPowerLimited;
+  bool get isValid => error == null && quantity > 0;
+
   /// Position size in quote currency (e.g. USDT).
   final double positionSize;
 
@@ -35,6 +42,8 @@ class RiskCalculation {
   final double? takeProfitPrice;
 
   const RiskCalculation({
+    this.error,
+    this.buyingPowerLimited = false,
     required this.positionSize,
     required this.quantity,
     required this.riskAmount,
@@ -63,85 +72,77 @@ class RiskCalculation {
 class RiskCalculator {
   RiskCalculator._();
 
-  /// Compute position sizing and risk metrics.
-  ///
-  /// [accountBalance] — current account balance in quote currency.
-  /// [riskPercent] — percentage of account to risk (e.g. 1.0 = 1%).
-  /// [entryPrice] — planned entry price.
-  /// [stopLossPrice] — stop loss price.
-  /// [takeProfitPrice] — optional take profit price.
-  /// [leverage] — leverage multiplier (default 1.0).
-  /// [feePercent] — per-side fee percentage (default 0.075%).
+  /// Size by total estimated stop loss INCLUDING fees and adverse stop slippage.
+  /// Entry is the expected fill price. Leverage caps buying power, never risk.
+  /// Direction may be inferred for backwards compatibility; order tickets must
+  /// pass [isLong] explicitly. These are estimates, not guaranteed loss limits.
   static RiskCalculation compute({
     required double accountBalance,
     required double riskPercent,
     required double entryPrice,
     required double stopLossPrice,
     double? takeProfitPrice,
+    bool? isLong,
     double leverage = 1.0,
     double feePercent = 0.075,
+    double slippagePercent = 0.05,
   }) {
+    RiskCalculation invalid(String message) => RiskCalculation(
+      positionSize: 0, quantity: 0, riskAmount: 0, potentialReward: 0,
+      riskRewardRatio: 0, riskPercent: 0, feeCost: 0, netReward: 0,
+      error: message,
+    );
+    final inputs = [accountBalance, riskPercent, entryPrice, stopLossPrice,
+      leverage, feePercent, slippagePercent, if (takeProfitPrice != null) takeProfitPrice];
+    if (inputs.any((v) => !v.isFinite)) {
+      return invalid('Use finite numeric values for every field.');
+    }
     if (accountBalance <= 0 || entryPrice <= 0 || stopLossPrice <= 0) {
-      return RiskCalculation.zero;
+      return invalid('Balance, entry and stop loss must be positive.');
     }
-
-    final isLong = stopLossPrice < entryPrice;
-
-    // Price risk percentage (distance from entry to SL).
-    final priceRiskPct = (entryPrice - stopLossPrice).abs() / entryPrice;
-    if (priceRiskPct <= 0) return RiskCalculation.zero;
-
-    // Dollar risk amount.
-    final riskAmount = accountBalance * (riskPercent / 100.0);
-
-    // Position size: risk_amount / price_risk_pct — how much notional to
-    // hold so that moving entry→SL costs exactly riskAmount.
-    final positionSize = riskAmount / priceRiskPct;
-
-    // Quantity in base asset.
-    final quantity = positionSize / entryPrice;
-
-    // Fee cost (open + close).
-    final feeCost = positionSize * (feePercent / 100.0) * 2.0;
-
-    // Potential reward calculation.
-    double potentialReward = 0;
-    double riskRewardRatio = 0;
-    if (takeProfitPrice != null && takeProfitPrice > 0) {
-      final priceRewardPct = isLong
-          ? (takeProfitPrice - entryPrice) / entryPrice
-          : (entryPrice - takeProfitPrice) / entryPrice;
-      final rawReward = positionSize * priceRewardPct;
-      potentialReward = rawReward;
-      riskRewardRatio = priceRiskPct > 0 ? priceRewardPct / priceRiskPct : 0;
+    if (riskPercent <= 0 || riskPercent > 10 || leverage < 1 || leverage > 100 ||
+        feePercent < 0 || feePercent > 5 || slippagePercent < 0 || slippagePercent > 5) {
+      return invalid('Risk must be 0–10%, leverage 1–100x and costs 0–5%.');
     }
-
-    final netReward = potentialReward - feeCost;
-
+    final long = isLong ?? stopLossPrice < entryPrice;
+    if (long ? stopLossPrice >= entryPrice : stopLossPrice <= entryPrice) {
+      return invalid(long ? 'Long stop must be below entry.' : 'Short stop must be above entry.');
+    }
+    if (takeProfitPrice != null && (takeProfitPrice <= 0 ||
+        (long ? takeProfitPrice <= entryPrice : takeProfitPrice >= entryPrice))) {
+      return invalid(long ? 'Long target must be above entry.' : 'Short target must be below entry.');
+    }
+    final fee = feePercent / 100;
+    final stopFill = stopLossPrice * (1 + (long ? -1 : 1) * slippagePercent / 100);
+    final lossPerUnit = (entryPrice - stopFill).abs() + (entryPrice + stopFill) * fee;
+    final budget = accountBalance * riskPercent / 100;
+    final riskQuantity = budget / lossPerUnit;
+    // Margin plus entry fee must fit available funds.
+    final maxQuantity = accountBalance / (entryPrice / leverage + entryPrice * fee);
+    final quantity = math.min(riskQuantity, maxQuantity);
+    final notional = quantity * entryPrice;
+    final risk = quantity * lossPerUnit;
+    final reward = takeProfitPrice == null ? 0.0 :
+        quantity * (long ? takeProfitPrice - entryPrice : entryPrice - takeProfitPrice);
+    final fees = quantity * (entryPrice + (takeProfitPrice ?? stopFill)) * fee;
+    final netReward = takeProfitPrice == null ? 0.0 : reward - fees;
+    if (![quantity, notional, risk, reward, fees, netReward].every((v) => v.isFinite)) {
+      return invalid('Values exceed supported calculation range.');
+    }
     return RiskCalculation(
-      positionSize: positionSize,
-      quantity: quantity,
-      riskAmount: riskAmount,
-      potentialReward: potentialReward,
-      riskRewardRatio: riskRewardRatio,
-      riskPercent: riskPercent,
-      feeCost: feeCost,
-      netReward: netReward,
-      stopLossPrice: stopLossPrice,
-      takeProfitPrice: takeProfitPrice,
+      positionSize: notional, quantity: quantity, riskAmount: risk,
+      potentialReward: reward, riskRewardRatio: risk > 0 ? netReward / risk : 0,
+      riskPercent: risk / accountBalance * 100, feeCost: fees,
+      netReward: netReward, stopLossPrice: stopLossPrice,
+      takeProfitPrice: takeProfitPrice, buyingPowerLimited: maxQuantity < riskQuantity,
     );
   }
 
-  /// Quick position size calculation (no TP, just entry + SL).
   static double quickPositionSize({
     required double accountBalance,
     required double riskPercent,
     required double entryPrice,
     required double stopLossPrice,
-  }) {
-    if (accountBalance <= 0 || entryPrice <= 0 || stopLossPrice <= 0) return 0;
-    final priceRiskPct = (entryPrice - stopLossPrice).abs() / entryPrice;
-    if (priceRiskPct <= 0) return 0;
-    return (accountBalance * (riskPercent / 100.0)) / priceRiskPct;
-  }
+  }) => compute(accountBalance: accountBalance, riskPercent: riskPercent,
+    entryPrice: entryPrice, stopLossPrice: stopLossPrice).positionSize;
 }

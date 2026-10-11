@@ -5,6 +5,12 @@
 include: package:flutter_lints/flutter.yaml
 
 analyzer:
+  exclude:
+    - .tools/**
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
   language:
     # Treat implicit downcasts from dynamic as errors. Most of this codebase
     # decodes JSON, where a silent bad cast is the easiest bug to ship.
