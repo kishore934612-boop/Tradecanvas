@@ -35,7 +35,6 @@ import 'package:app/domain/repositories/drawing_repository.dart';
 import 'package:app/engine/discipline_guardrails.dart';
 import 'package:app/engine/drawing_controller.dart';
 import 'package:app/engine/replay_controller.dart';
-import 'package:app/engine/risk_calculator.dart';
 import 'package:app/models/instrument.dart';
 import 'package:app/models/replay_order.dart';
 import 'package:app/providers/market_data_provider.dart';
@@ -77,7 +76,8 @@ class _ReplayScreenState extends State<ReplayScreen> {
 
   /// TP/SL input enablement.
   bool _tpEnabled = false;
-  bool _slEnabled = false;
+  final bool _slEnabled = true;
+  OrderSide _calculatorSide = OrderSide.buy;
 
   /// Limit/stop price for non-market orders.
   final TextEditingController _limitPriceController = TextEditingController();
@@ -86,53 +86,37 @@ class _ReplayScreenState extends State<ReplayScreen> {
 
   /// Convert closed ReplayOrders to ReplayTrades for backtest analytics.
   List<ReplayTrade> get _replayTrades =>
-      _replay.closedTrades
+      [..._replay.closedTrades, ..._replay.openPositions]
           .map((o) => ReplayTrade.fromOrder(o, _instrument.symbol))
           .toList();
 
+  void _showOrderMessage(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
   void _placeOrder(OrderSide side) {
-    if (_replay.activeViolation != null) return;
-    if (_replay.openPosition != null) return;
-    final current = _replay.candles.lastOrNull;
-    if (current == null) return;
-
-    double orderPrice;
-    if (_orderType == OrderType.market) {
-      orderPrice = current.close;
-    } else {
-      orderPrice = double.tryParse(_limitPriceController.text) ?? current.close;
+    _calculatorSide = side;
+    final price = _orderType == OrderType.market ? _replay.lastPrice
+        : double.tryParse(_limitPriceController.text);
+    final sl = double.tryParse(_slController.text);
+    final tp = _tpEnabled ? double.tryParse(_tpController.text) : null;
+    if (price == null || sl == null || (_tpEnabled && tp == null)) {
+      _showOrderMessage('Enter a valid entry, required stop loss and enabled target.');
+      return;
     }
-
-    // Parse TP/SL.
-    final tp = _tpEnabled ? (double.tryParse(_tpController.text)) : null;
-    final sl = _slEnabled ? (double.tryParse(_slController.text)) : null;
-
-    // Calculate position size using risk calculator.
-    double positionSize = 1000.0;
-    double quantity = positionSize / orderPrice;
-    if (sl != null && sl > 0) {
-      final calc = RiskCalculator.compute(
-        accountBalance: _replay.accountBalance,
-        riskPercent: _replay.riskPercent,
-        entryPrice: orderPrice,
-        stopLossPrice: sl,
-        takeProfitPrice: tp,
-      );
-      positionSize = calc.positionSize;
-      quantity = calc.quantity;
+    final calc = _replay.calculateOrderRisk(side: side, type: _orderType,
+        price: price, stopLossPrice: sl, takeProfitPrice: tp);
+    if (!calc.isValid) {
+      _showOrderMessage(calc.error ?? 'Invalid trade plan.');
+      return;
     }
-
     Haptics.selection();
-    _replay.placeOrder(
-      side: side,
-      type: _orderType,
-      price: orderPrice,
-      stopLossPrice: sl,
-      takeProfitPrice: tp,
-      positionSize: positionSize,
-      quantity: quantity,
-    );
-    setState(() {});
+    final id = _replay.placeOrder(side: side, type: _orderType, price: price,
+      stopLossPrice: sl, takeProfitPrice: tp,
+      positionSize: calc.positionSize, quantity: calc.quantity);
+    _showOrderMessage(id == null ? _replay.lastOrderError ?? 'Order rejected.'
+        : 'Paper order queued for the next bar. Estimated risk: '
+          '${calc.riskAmount.toStringAsFixed(2)} ${_instrument.quote}.');
   }
 
   void _closePosition() {
@@ -142,6 +126,7 @@ class _ReplayScreenState extends State<ReplayScreen> {
   }
 
   void _showBacktestAnalytics() {
+    _replay.pause();
     Haptics.selection();
     final currentPrice = _replay.candles.lastOrNull?.close ?? 1.0;
     Navigator.of(context).push<void>(
@@ -149,6 +134,7 @@ class _ReplayScreenState extends State<ReplayScreen> {
         builder: (_) => BacktestAnalyticsScreen(
           instrument: _instrument,
           trades: _replayTrades,
+          startingBalance: _replay.startingBalance,
           currentPrice: currentPrice,
         ),
       ),
@@ -156,13 +142,15 @@ class _ReplayScreenState extends State<ReplayScreen> {
   }
 
   void _showRiskCalculator() {
+    _replay.pause();
     Haptics.selection();
-    final currentPrice = _replay.candles.lastOrNull?.close ?? 0;
+    final currentPrice = _orderType == OrderType.market ? _replay.lastPrice
+        : double.tryParse(_limitPriceController.text) ?? 0;
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (_) => Padding(
+      builder: (_) => SingleChildScrollView(
         padding: EdgeInsets.only(
           bottom: MediaQuery.of(context).viewInsets.bottom,
         ),
@@ -171,17 +159,17 @@ class _ReplayScreenState extends State<ReplayScreen> {
           entryPrice: currentPrice.toDouble(),
           stopLossPrice: double.tryParse(_slController.text),
           takeProfitPrice: double.tryParse(_tpController.text),
-          isLong: true,
+          isLong: _calculatorSide == OrderSide.buy,
+          initialRiskPercent: _replay.riskPercent,
+          includeEntrySlippage: _orderType != OrderType.limit,
           onApply: (calc) {
+            _replay.setRiskPercent(calc.riskPercent);
             setState(() {
               if (calc.stopLossPrice > 0) {
-                _slController.text = calc.stopLossPrice.toStringAsFixed(2);
-                _slEnabled = true;
+                _slController.text = calc.stopLossPrice.toString();
               }
-              if (calc.takeProfitPrice != null && calc.takeProfitPrice! > 0) {
-                _tpController.text = calc.takeProfitPrice!.toStringAsFixed(2);
-                _tpEnabled = true;
-              }
+              _tpEnabled = calc.takeProfitPrice != null;
+              _tpController.text = calc.takeProfitPrice?.toString() ?? '';
             });
           },
         ),
@@ -276,6 +264,7 @@ class _ReplayScreenState extends State<ReplayScreen> {
     if (picked.symbol == _instrument.symbol) return;
 
     _drawings.dispose();
+    _replay.dispose();
     setState(() => _createControllers(picked));
   }
 
@@ -297,6 +286,7 @@ class _ReplayScreenState extends State<ReplayScreen> {
 
     Haptics.selection();
     _drawings.dispose();
+    _replay.dispose();
     setState(() => _createControllers(target));
   }
 
@@ -769,6 +759,20 @@ class _ReplayScreenState extends State<ReplayScreen> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(10, 6, 10, 0),
+                            child: Text('PAPER ONLY · 1x buying power · next-bar entries · '
+                                '${_replay.execution.feePercent}% fee/side · '
+                                '${_replay.execution.slippagePercent}% market slippage',
+                                style: TextStyle(fontSize: 9, color: colors.mutedForeground)),
+                          ),
+                          if (_replay.activeViolation != null && openPos != null)
+                            Text('New entries locked: ${_replay.activeViolation!.label}. You may still close this position.',
+                                style: TextStyle(fontSize: 10, color: colors.negative)),
+                          if (_replay.lastOrderError != null)
+                            Padding(padding: const EdgeInsets.symmetric(horizontal: 10),
+                              child: Text(_replay.lastOrderError!,
+                                style: TextStyle(fontSize: 10, color: colors.negative))),
                           // Order Type Selector (Market / Limit / Stop).
                           if (openPos == null)
                             Padding(
@@ -794,12 +798,12 @@ class _ReplayScreenState extends State<ReplayScreen> {
                                   const Spacer(),
                                   // TP/SL toggles.
                                   _ToggleChip(
-                                    label: 'SL',
+                                    label: 'SL*',
                                     active: _slEnabled,
                                     color: colors.negative,
                                     onTap: () {
                                       Haptics.selection();
-                                      setState(() => _slEnabled = !_slEnabled);
+                                      _showOrderMessage('A protective stop loss is required for every paper trade.');
                                     },
                                   ),
                                   const SizedBox(width: 4),
@@ -891,7 +895,8 @@ class _ReplayScreenState extends State<ReplayScreen> {
                                         _orderType == OrderType.market ? 'BUY (LONG)' : 'BUY ${_orderType.name.toUpperCase()}',
                                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
                                       ),
-                                      onPressed: () => _placeOrder(OrderSide.buy),
+                                      onPressed: _replay.hasOpenOrPendingOrder || _replay.isAtEnd || _replay.isLoading
+                                          ? null : () => _placeOrder(OrderSide.buy),
                                     ),
                                   ),
                                   const SizedBox(width: 8),
@@ -909,7 +914,8 @@ class _ReplayScreenState extends State<ReplayScreen> {
                                         _orderType == OrderType.market ? 'SELL (SHORT)' : 'SELL ${_orderType.name.toUpperCase()}',
                                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
                                       ),
-                                      onPressed: () => _placeOrder(OrderSide.sell),
+                                      onPressed: _replay.hasOpenOrPendingOrder || _replay.isAtEnd || _replay.isLoading
+                                          ? null : () => _placeOrder(OrderSide.sell),
                                     ),
                                   ),
                                 ] else ...[
@@ -1020,7 +1026,7 @@ class _ReplayScreenState extends State<ReplayScreen> {
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
                                           Text(
-                                            '${order.side.name.toUpperCase()} ${order.type == OrderType.limit ? "LMT" : "STP"} @ ${order.price.toStringAsFixed(2)}',
+                                            '${order.side.name.toUpperCase()} ${order.type == OrderType.market ? "MKT NEXT BAR" : order.type == OrderType.limit ? "LMT" : "STP"} @ ${order.price.toStringAsFixed(2)}',
                                             style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Color(0xFFF59E0B)),
                                           ),
                                           const SizedBox(width: 4),
@@ -1049,13 +1055,11 @@ class _ReplayScreenState extends State<ReplayScreen> {
                 ),
 
                 // Cooldown overlay (discipline guardrail violated).
-                if (_replay.activeViolation != null)
+                if (_replay.activeViolation != null && openPos == null)
                   Positioned.fill(
                     child: CooldownOverlay(
                       violation: _replay.activeViolation!,
-                      drawdownPercent: _replay.startingBalance > 0
-                          ? ((_replay.startingBalance - _replay.accountBalance) / _replay.startingBalance * 100)
-                          : 0,
+                      drawdownPercent: _replay.drawdownPercent,
                       consecutiveLosses: _replay.consecutiveLosses,
                       totalTrades: _replay.totalTradesTaken,
                       maxTrades: _replay.disciplineSettings.maxTradesPerSession,
@@ -1315,7 +1319,7 @@ class _TransportBar extends StatelessWidget {
             children: [
               _TransportButton(
                 icon: Icons.restart_alt_rounded,
-                tooltip: 'Restart',
+                tooltip: 'Restart and clear paper trades',
                 onTap: () {
                   Haptics.light();
                   replay.restart();
@@ -1324,7 +1328,7 @@ class _TransportBar extends StatelessWidget {
               _TransportButton(
                 icon: Icons.skip_previous_rounded,
                 tooltip: 'Step back',
-                enabled: !replay.isAtStart,
+                enabled: !replay.isAtStart && replay.canRewind,
                 onTap: () {
                   Haptics.light();
                   replay.stepBackward();
@@ -1731,7 +1735,7 @@ class _DisciplineSettingsSheetState extends State<_DisciplineSettingsSheet> {
           ),
           const SizedBox(height: 16),
           _SettingSlider(
-            label: 'Max Daily Drawdown',
+            label: 'Max Peak Equity Drawdown',
             value: '${_maxDrawdown.toStringAsFixed(1)}%',
             sliderValue: _maxDrawdown,
             min: 1.0,

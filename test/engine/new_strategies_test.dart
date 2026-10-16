@@ -8,7 +8,7 @@ void main() {
     late List<CandleData> candles;
 
     setUp(() {
-      final now = DateTime.now().millisecondsSinceEpoch;
+      const now = 100000;
       candles = List.generate(
         30,
         (i) => CandleData(
